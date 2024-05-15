@@ -22,8 +22,8 @@ logger = logging.getLogger(__name__)
 state_manager = IntegrationStateManager()
 
 
-DEFAULT_FIRE_LOOKBACK_DAYS = 1
-DEFAULT_INTEGRATED_LOOKBACK_DAYS = 1
+# DEFAULT_FIRE_LOOKBACK_DAYS = 1
+# DEFAULT_INTEGRATED_LOOKBACK_DAYS = 1
 
 DATASET_GFW_INTEGRATED_ALERTS = "gfw_integrated_alerts"
 DATA_API_ROOT_URL = "https://data-api.globalforestwatch.org"
@@ -553,7 +553,7 @@ async def get_aoi_data(integration, config):
     auth = get_auth_config(integration)
     try:
         token = await get_token(integration, auth)
-        aoi_id = aoi_from_url(config.url)
+        aoi_id = aoi_from_url(config.gfw_share_link_url)
         aoi_data = await get_aoi(integration, auth, aoi_id, token)
     except Exception as e:
         message = f"Unhandled exception occurred. Exception: {e}"
