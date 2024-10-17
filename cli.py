@@ -97,7 +97,7 @@ def nasa_viirs_fire_alerts(url, username, password, days, lowest_confidence, end
             print(fire_alerts)
     asyncio.run(fn())
 
-@cli.command(help="Get NASA Viirs Fire Alerts for the provided URL")
+@cli.command(help="Get GFW Integrated Alerts for the provided URL")
 @click.argument('url', type=str)
 @click.option('--days', type=int, required=False, default=2, help="Number of days to look back for fire alerts")
 @click.option('--end_date', type=Datetime(format="%Y-%m-%d"), help='End date in YYYY-MM-DD format')
