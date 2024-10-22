@@ -59,3 +59,11 @@ class PullEventsConfig(PullActionConfiguration):
         title="Force fetch",
         description="Force fetch even if in a quiet period."
     )
+
+    partition_interval_size_in_degrees: float = pydantic.Field(
+        1.0,
+        title="Partition interval size in degrees",
+        description="Size of the partition interval in degrees.",
+        max=1.0,
+        min=0.3
+    )

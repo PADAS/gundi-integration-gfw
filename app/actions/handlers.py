@@ -152,7 +152,8 @@ async def action_pull_events(integration:Integration, action_config: PullEventsC
                 for feature in geostore.attributes.geojson["features"]
             ]
         )
-        for partition in utils.generate_geometry_fragments(geometry_collection=geometry_collection):
+        for partition in utils.generate_geometry_fragments(geometry_collection=geometry_collection, 
+                                                           interval=action_config.partition_interval_size_in_degrees):
 
             geostore = await dataapi.create_geostore(geometry=mapping(partition))
 
