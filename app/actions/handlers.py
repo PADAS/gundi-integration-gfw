@@ -176,7 +176,7 @@ async def action_pull_events(integration:Integration, action_config: PullEventsC
     # Wait until they're all finished.
     results = await asyncio.gather(*tasklist)
 
-    quiet_minutes = random.randint(60, 180) # Todo: change to be more fair.
+    quiet_minutes = random.randint(240, 720) # Todo: change to be more fair.
     await state_manager.set_quiet_period(str(integration.id), "pull_events", timedelta(minutes=quiet_minutes))
 
     # The results are in the order of the tasklist.
