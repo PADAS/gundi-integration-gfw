@@ -4,7 +4,7 @@ Gundi Integration for Global Forest Watch (GFW)
 
 ## Introduction
 
-This code runs as a Cloud Run Service in Gundi's infrastruction, and can be configured to fetch both VIIRS Fire Alerts and GFW Integrated Alerts.
+This code runs as a Cloud Run Service in Gundi's infrastructure, and can be configured to fetch both VIIRS Fire Alerts and GFW Integrated Alerts.
 
 The configuration requires:
 
