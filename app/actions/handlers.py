@@ -44,7 +44,7 @@ async def handle_transformed_data(transformed_data, integration_id, action_id):
                 'action_id': action_id
             }
         )
-        return [msg]
+        return {"error": msg}
     else:
         return response
 
@@ -107,10 +107,12 @@ def get_auth_config(integration):
 
 
 @activity_logger()
-async def action_pull_events(integration:Integration, action_config: PullEventsConfig):
+async def action_pull_events(integration: Integration, action_config: PullEventsConfig):
+    result = {"events_extracted": 0}
 
     if not action_config.force_fetch and await state_manager.is_quiet_period(str(integration.id), "pull_events"):
-        return {"message": 'Quiet period is active.'}
+        result["message"] = "Quiet period is active."
+        return result
 
 
     logger.info(f"Executing 'pull_events' action with integration {integration} and action_config {action_config}...")
@@ -129,13 +131,14 @@ async def action_pull_events(integration:Integration, action_config: PullEventsC
         logger.error(
             msg,
             extra={
-                "needs_attention": True,    
+                "needs_attention": True,
                 "integration_id": str(integration.id),
                 "aoi_id": aoi_data.id,
                 "gfw_url": integration.base_url,
             },
         )
-        return [msg]
+        result["message"] = msg
+        return result
 
     # Get AOI and Geostore data.
     aoi_id = await dataapi.aoi_from_url(action_config.gfw_share_link_url)
@@ -173,13 +176,14 @@ async def action_pull_events(integration:Integration, action_config: PullEventsC
                  ]
     
     # Wait until they're all finished.
-    results = await asyncio.gather(*tasklist)
+    tasks_results = await asyncio.gather(*tasklist)
 
     quiet_minutes = random.randint(60, 180) # Todo: change to be more fair.
     await state_manager.set_quiet_period(str(integration.id), "pull_events", timedelta(minutes=quiet_minutes))
 
-    # The results are in the order of the tasklist.
-    return results
+    result["events_extracted"] = sum([r["total_alerts"] for r in tasks_results])
+    result["details"] = tasks_results  # The results are in the order of the tasklist.
+    return result
 
 
 def generate_date_pairs(lower_date, upper_date, interval=MAX_DAYS_PER_QUERY):
@@ -190,9 +194,10 @@ def generate_date_pairs(lower_date, upper_date, interval=MAX_DAYS_PER_QUERY):
 
 async def get_integrated_alerts(integration:Integration, action_config: PullEventsConfig, auth_config: AuthenticateConfig,
                                 aoi_data: AOIData, sema: asyncio.Semaphore):
+    total_alerts = 0
 
     if not action_config.include_integrated_alerts:
-        return {'dataset': DATASET_GFW_INTEGRATED_ALERTS, "message": 'Not included in action config.'}
+        return {'dataset': DATASET_GFW_INTEGRATED_ALERTS, "message": 'Not included in action config.', "total_alerts": total_alerts}
 
     dataapi = DataAPI(username=auth_config.email, password=auth_config.password.get_secret_value())
 
@@ -222,7 +227,7 @@ async def get_integrated_alerts(integration:Integration, action_config: PullEven
                 "dataset_updated_on": dataset_metadata.updated_on.isoformat(),
             },
         )
-        return {"dataset": DATASET_GFW_INTEGRATED_ALERTS, "message": 'No new data available.'}
+        return {"dataset": DATASET_GFW_INTEGRATED_ALERTS, "message": 'No new data available.', "total_alerts": total_alerts}
 
     aoi_id = await dataapi.aoi_from_url(action_config.gfw_share_link_url)
     aoi_data = await dataapi.get_aoi(aoi_id=aoi_id)
@@ -240,7 +245,7 @@ async def get_integrated_alerts(integration:Integration, action_config: PullEven
                                                lowest_confidence=action_config.integrated_alerts_lowest_confidence, semaphore=sema)
               for geostore_id in geostore_ids 
               for lower, upper in generate_date_pairs(start_date, end_date)]
-    
+
     for t in asyncio.as_completed(tasks):
         integrated_alerts = await t
         if integrated_alerts:
@@ -251,6 +256,7 @@ async def get_integrated_alerts(integration:Integration, action_config: PullEven
                 str(integration.id),
                 "pull_events"
             )
+            total_alerts += len(integrated_alerts)
 
     dataset_status = DatasetStatus(
         dataset=dataset_metadata.dataset,
@@ -265,14 +271,14 @@ async def get_integrated_alerts(integration:Integration, action_config: PullEven
         source_id=DATASET_GFW_INTEGRATED_ALERTS
     )
 
-    return {"dataset": DATASET_GFW_INTEGRATED_ALERTS, "response": dataset_status.dict()}
+    return {"dataset": DATASET_GFW_INTEGRATED_ALERTS, "response": dataset_status.dict(), "total_alerts": total_alerts}
 
 
 async def get_nasa_viirs_fire_alerts(integration:Integration, action_config: PullEventsConfig, auth_config: AuthenticateConfig,
                                      aoi_data: AOIData, sema: asyncio.Semaphore):
-
+    total_alerts = 0
     if not action_config.include_fire_alerts:
-        return {'dataset': DATASET_NASA_VIIRS_FIRE_ALERTS, "message": 'Not included in action config.'}
+        return {'dataset': DATASET_NASA_VIIRS_FIRE_ALERTS, "message": 'Not included in action config.', "total_alerts": total_alerts}
 
     dataapi = DataAPI(username=auth_config.email, password=auth_config.password.get_secret_value())
 
@@ -302,7 +308,7 @@ async def get_nasa_viirs_fire_alerts(integration:Integration, action_config: Pul
                 "dataset_updated_on": dataset_metadata.updated_on.isoformat(),
             },
         )
-        return {"dataset": DATASET_NASA_VIIRS_FIRE_ALERTS, "message": 'No new data available.'}
+        return {"dataset": DATASET_NASA_VIIRS_FIRE_ALERTS, "message": 'No new data available.', "total_alerts": total_alerts}
 
     # aoi_id = await dataapi.aoi_from_url(action_config.gfw_share_link_url)
     # aoi_data = await dataapi.get_aoi(aoi_id=aoi_id)
@@ -318,6 +324,7 @@ async def get_nasa_viirs_fire_alerts(integration:Integration, action_config: Pul
                                                 lowest_confidence=action_config.fire_alerts_lowest_confidence, semaphore=sema)
               for geostore_id in geostore_ids 
               for lower, upper in generate_date_pairs(start_date, end_date)]
+
     for t in asyncio.as_completed(tasks):
         fire_alerts = await t
         if fire_alerts:
@@ -328,6 +335,7 @@ async def get_nasa_viirs_fire_alerts(integration:Integration, action_config: Pul
                 str(integration.id),
                 "pull_events"
             )
+            total_alerts += len(fire_alerts)
 
     dataset_status = DatasetStatus(
         dataset=dataset_metadata.dataset,
@@ -342,6 +350,6 @@ async def get_nasa_viirs_fire_alerts(integration:Integration, action_config: Pul
         source_id=DATASET_NASA_VIIRS_FIRE_ALERTS
     )
 
-    return {"dataset": DATASET_NASA_VIIRS_FIRE_ALERTS, "response": dataset_status.dict()}
+    return {"dataset": DATASET_NASA_VIIRS_FIRE_ALERTS, "response": dataset_status.dict(), "total_alerts": total_alerts}
 
 
