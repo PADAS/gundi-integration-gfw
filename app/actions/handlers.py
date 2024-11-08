@@ -181,11 +181,9 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
     quiet_minutes = random.randint(60, 180) # Todo: change to be more fair.
     await state_manager.set_quiet_period(str(integration.id), "pull_events", timedelta(minutes=quiet_minutes))
 
-    # The results are in the order of the tasklist.
-    return {
-        "events_extracted": sum([r["total_alerts"] for r in tasks_results]),
-        "results": tasks_results
-    }
+    result["events_extracted"] = sum([r["total_alerts"] for r in tasks_results])
+    result["details"] = tasks_results  # The results are in the order of the tasklist.
+    return result
 
 
 def generate_date_pairs(lower_date, upper_date, interval=MAX_DAYS_PER_QUERY):
