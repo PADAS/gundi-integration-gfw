@@ -499,13 +499,17 @@ class DataAPI:
             if val.status == 'success':
                 return val.data
 
+    @staticmethod
+    def __get_alerts_predicate(r):
+        return hasattr(r, 'status_codde') and r.status_code == 429
+    
     @backoff.on_exception(custom_backoff, (httpx.TimeoutException, httpx.HTTPStatusError),
                           max_tries=3, 
                           on_giveup=giveup_handler, raise_on_giveup=False,
                           on_backoff=backoff_hdlr)
     @backoff.on_predicate(
         backoff.runtime,
-        predicate=lambda r: r.status_code == 429, # and r.headers.get("Retry-After"),
+        predicate=__get_alerts_predicate,
         value=lambda r: int(r.headers.get("Retry-After", 5*60)),
         jitter=None,
         )   
