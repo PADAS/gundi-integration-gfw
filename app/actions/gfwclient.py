@@ -100,6 +100,8 @@ class DataAPIQueryException(Exception):
 class GFWClientException(Exception):
     pass
 
+class QuotaExceeded(GFWClientException):
+    pass
 
 class AOIAttributes(pydantic.BaseModel):
     name: Optional[str]
@@ -499,20 +501,21 @@ class DataAPI:
             if val.status == 'success':
                 return val.data
 
-    @staticmethod
-    def __get_alerts_predicate(r):
-        return hasattr(r, 'status_codde') and r.status_code == 429
+    # @staticmethod
+    # def __get_alerts_predicate(r):
+    #     logger.debug(f"Response is {r}.")
+    #     return hasattr(r, 'status_codde') and r.status_code == 429
     
+    # @backoff.on_predicate(
+    #     backoff.runtime,
+    #     predicate=__get_alerts_predicate,
+    #     value=lambda r: int(r.headers.get("Retry-After", 5*60)),
+    #     jitter=None,
+    #     )   
     @backoff.on_exception(custom_backoff, (httpx.TimeoutException, httpx.HTTPStatusError),
                           max_tries=3, 
                           on_giveup=giveup_handler, raise_on_giveup=False,
                           on_backoff=backoff_hdlr)
-    @backoff.on_predicate(
-        backoff.runtime,
-        predicate=__get_alerts_predicate,
-        value=lambda r: int(r.headers.get("Retry-After", 5*60)),
-        jitter=None,
-        )   
     async def get_alerts(
         self,
         *,
@@ -558,6 +561,9 @@ class DataAPI:
                     data_len = len(data.get("data"))
                     logger.info(f"Extracted {data_len} alerts from dataset {dataset}, geostore_id: {geostore_id} for period {lower_date} - {upper_date}.")
                     return data.get("data", [])
+                elif response.status_code == 429:
+                    logger.warning(f"Rate limit exceeded. Retrying in {response.headers.get('Retry-After', 'unspecified')} seconds.")
+                    raise QuotaExceeded()
                 else:
                     logger.error(
                         f"Failed getting data for dataset {dataset}. status: {response.status_code}, text: {response.text}",

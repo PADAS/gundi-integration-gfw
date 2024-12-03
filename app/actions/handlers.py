@@ -6,7 +6,8 @@ import app.settings
 
 from app.actions import utils
 from app.actions.gfwclient import DataAPI, Geostore, DatasetStatus, \
-    AOIData, DATASET_GFW_INTEGRATED_ALERTS, DATASET_NASA_VIIRS_FIRE_ALERTS, DataAPIAuthException
+    AOIData, DATASET_GFW_INTEGRATED_ALERTS, DATASET_NASA_VIIRS_FIRE_ALERTS, DataAPIAuthException, \
+    QuotaExceeded
 from shapely.geometry import GeometryCollection, shape, mapping
 from datetime import timezone, timedelta, datetime
 
@@ -177,10 +178,10 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
     
     # Wait until they're all finished.
     results = await asyncio.gather(*tasklist)
-    quiet_minutes = random.randint(24*60, 36*60) # Todo: change to be more fair.
+    quiet_minutes = 60 * random.randint(4, 8) # Todo: change to be more fair.
     await state_manager.set_quiet_period(str(integration.id), "pull_events", timedelta(minutes=quiet_minutes))
 
-    result["events_extracted"] = sum([r["total_alerts"] for r in tasks_results])
+    result["events_extracted"] = sum([r["total_alerts"] for r in tasks_results if r])
     result["details"] = tasks_results  # The results are in the order of the tasklist.
     return result
 
@@ -245,32 +246,35 @@ async def get_integrated_alerts(integration:Integration, action_config: PullEven
               for geostore_id in geostore_ids 
               for lower, upper in generate_date_pairs(start_date, end_date)]
 
-    for t in asyncio.as_completed(tasks):
-        integrated_alerts = await t
-        if integrated_alerts:
-            logger.info(f"Integrated alerts pulled with success.")
-            transformed_data = [transform_integrated_alert(alert)for alert in integrated_alerts]
-            await handle_transformed_data(
-                transformed_data,
-                str(integration.id),
-                "pull_events"
-            )
-            total_alerts += len(integrated_alerts)
+    try:
+        for t in asyncio.as_completed(tasks):
+            integrated_alerts = await t
+            if integrated_alerts:
+                logger.info(f"Integrated alerts pulled with success.")
+                transformed_data = [transform_integrated_alert(alert)for alert in integrated_alerts]
+                await handle_transformed_data(
+                    transformed_data,
+                    str(integration.id),
+                    "pull_events"
+                )
+                total_alerts += len(integrated_alerts)
+    except QuotaExceeded:
+        logger.warning(f"Quota exceeded for {auth_config.email} on dataset: {DATASET_GFW_INTEGRATED_ALERTS}.")
+    else:
+        dataset_status = DatasetStatus(
+            dataset=dataset_metadata.dataset,
+            version=dataset_metadata.version,
+            latest_updated_on=dataset_metadata.updated_on
+        )
 
-    dataset_status = DatasetStatus(
-        dataset=dataset_metadata.dataset,
-        version=dataset_metadata.version,
-        latest_updated_on=dataset_metadata.updated_on
-    )
+        await state_manager.set_state(
+            str(integration.id),
+            "pull_events",
+            dataset_status.json(),
+            source_id=DATASET_GFW_INTEGRATED_ALERTS
+        )
 
-    await state_manager.set_state(
-        str(integration.id),
-        "pull_events",
-        dataset_status.json(),
-        source_id=DATASET_GFW_INTEGRATED_ALERTS
-    )
-
-    return {"dataset": DATASET_GFW_INTEGRATED_ALERTS, "response": dataset_status.dict(), "total_alerts": total_alerts}
+        return {"dataset": DATASET_GFW_INTEGRATED_ALERTS, "response": dataset_status.dict(), "total_alerts": total_alerts}
 
 
 async def get_nasa_viirs_fire_alerts(integration:Integration, action_config: PullEventsConfig, auth_config: AuthenticateConfig,
@@ -324,31 +328,36 @@ async def get_nasa_viirs_fire_alerts(integration:Integration, action_config: Pul
               for geostore_id in geostore_ids 
               for lower, upper in generate_date_pairs(start_date, end_date)]
 
-    for t in asyncio.as_completed(tasks):
-        fire_alerts = await t
-        if fire_alerts:
-            logger.info(f"Fire alerts pulled with success.")
-            transformed_data = [transform_fire_alert(alert) for alert in fire_alerts]
-            await handle_transformed_data(
-                transformed_data,
-                str(integration.id),
-                "pull_events"
-            )
-            total_alerts += len(fire_alerts)
+    try:
 
-    dataset_status = DatasetStatus(
-        dataset=dataset_metadata.dataset,
-        version=dataset_metadata.version,
-        latest_updated_on=dataset_metadata.updated_on
-    )
+        for t in asyncio.as_completed(tasks):
+            fire_alerts = await t
+            if fire_alerts:
+                logger.info(f"Fire alerts pulled with success.")
+                transformed_data = [transform_fire_alert(alert) for alert in fire_alerts]
+                await handle_transformed_data(
+                    transformed_data,
+                    str(integration.id),
+                    "pull_events"
+                )
+                total_alerts += len(fire_alerts)
+    except QuotaExceeded:
+        logger.warning(f"Quota exceeded for {auth_config.email} on dataset: {DATASET_NASA_VIIRS_FIRE_ALERTS}.")
 
-    await state_manager.set_state(
-        str(integration.id),
-        "pull_events",
-        dataset_status.json(),
-        source_id=DATASET_NASA_VIIRS_FIRE_ALERTS
-    )
+    else:
+        dataset_status = DatasetStatus(
+            dataset=dataset_metadata.dataset,
+            version=dataset_metadata.version,
+            latest_updated_on=dataset_metadata.updated_on
+        )
 
-    return {"dataset": DATASET_NASA_VIIRS_FIRE_ALERTS, "response": dataset_status.dict(), "total_alerts": total_alerts}
+        await state_manager.set_state(
+            str(integration.id),
+            "pull_events",
+            dataset_status.json(),
+            source_id=DATASET_NASA_VIIRS_FIRE_ALERTS
+        )
+
+        return {"dataset": DATASET_NASA_VIIRS_FIRE_ALERTS, "response": dataset_status.dict(), "total_alerts": total_alerts}
 
 
