@@ -176,9 +176,8 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
                  ]
     
     # Wait until they're all finished.
-    tasks_results = await asyncio.gather(*tasklist)
-
-    quiet_minutes = random.randint(60, 180) # Todo: change to be more fair.
+    results = await asyncio.gather(*tasklist)
+    quiet_minutes = random.randint(24*60, 36*60) # Todo: change to be more fair.
     await state_manager.set_quiet_period(str(integration.id), "pull_events", timedelta(minutes=quiet_minutes))
 
     result["events_extracted"] = sum([r["total_alerts"] for r in tasks_results])
