@@ -323,6 +323,11 @@ class DataAPI:
         self._auth_gen = None
         self._api_keys = []
 
+        self._quota_exceeded = {
+            DATASET_GFW_INTEGRATED_ALERTS: False,
+            DATASET_NASA_VIIRS_FIRE_ALERTS: False
+        }
+
     @backoff.on_exception(backoff.expo, (httpx.TimeoutException, httpx.HTTPStatusError), max_tries=3)
     async def get_access_token(self):
 
@@ -548,6 +553,11 @@ class DataAPI:
         }
 
         async def fn():
+
+            if self._quota_exceeded[dataset]:
+                logger.warning(f"Quota exceeded for dataset: {dataset}, so skipping.")
+                return
+            
             async with httpx.AsyncClient(timeout=DEFAULT_REQUEST_TIMEOUT) as client:
 
                 response = await client.get(f"{self.DATA_API_URL}/dataset/{dataset}/latest/query/json",
@@ -563,6 +573,7 @@ class DataAPI:
                     return data.get("data", [])
                 elif response.status_code == 429:
                     logger.warning(f"Rate limit exceeded. Retrying in {response.headers.get('Retry-After', 'unspecified')} seconds.")
+                    self._quota_exceeded[dataset] = True
                     raise QuotaExceeded()
                 else:
                     logger.error(
