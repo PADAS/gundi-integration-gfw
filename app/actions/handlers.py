@@ -153,12 +153,13 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
         )
         for partition in utils.generate_geometry_fragments(geometry_collection=geometry_collection):
             if partition == "error":
+                msg = f"Error while generating geometry fragments for Geometry collection {geometry_collection}. AOI {aoi_data.id}."
                 await log_activity(
                     integration_id=integration.id,
                     action_id="pull_events",
                     level=LogLevel.WARNING,
-                    title=f"Geometry collection has no bounds for AOI {aoi_data.id}.",
-                    data={"message": f"Geometry collection has no bounds for AOI {aoi_data.id}."}
+                    title=msg,
+                    data={"message": msg}
                 )
                 break
 
