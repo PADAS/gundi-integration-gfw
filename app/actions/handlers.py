@@ -11,13 +11,12 @@ from shapely.geometry import GeometryCollection, shape, mapping
 from datetime import timezone, timedelta, datetime
 
 from app.actions.configurations import AuthenticateConfig, PullEventsConfig
-from app.services.activity_logger import activity_logger
+from app.services.activity_logger import activity_logger, log_activity
 from app.services.gundi import send_events_to_gundi
 from app.services.state import IntegrationStateManager
 from app.services.errors import ConfigurationNotFound
 from app.services.utils import find_config_for_action
-from gundi_core.schemas.v2 import Integration
-
+from gundi_core.schemas.v2 import Integration, LogLevel
 
 GFW_INTEGRATED_ALERTS = "gfwgladalert"
 GFW_FIRE_ALERT = "gfwfirealert"
@@ -141,9 +140,6 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
         return result
 
     # Get AOI and Geostore data.
-    aoi_id = await dataapi.aoi_from_url(action_config.gfw_share_link_url)
-    aoi_data = await dataapi.get_aoi(aoi_id=aoi_id)
-
     geostore_ids = await state_manager.get_geostore_ids(aoi_data.id)
 
     if not geostore_ids:
@@ -156,6 +152,15 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
             ]
         )
         for partition in utils.generate_geometry_fragments(geometry_collection=geometry_collection):
+            if partition == "error":
+                await log_activity(
+                    integration_id=integration.id,
+                    action_id="pull_events",
+                    level=LogLevel.WARNING,
+                    title=f"Geometry collection has no bounds for AOI {aoi_data.id}.",
+                    data={"message": f"Geometry collection has no bounds for AOI {aoi_data.id}."}
+                )
+                break
 
             geostore = await dataapi.create_geostore(geometry=mapping(partition))
 
