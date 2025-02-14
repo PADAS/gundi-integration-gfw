@@ -29,7 +29,8 @@ def generate_geometry_fragments(geometry_collection, interval=0.5):
     # Check if envelope has valid bounds
     if not envelope.bounds:
         logger.warning(f"Geometry collection has no bounds: {geometry_collection}")
-        yield "error"
+        raise ValueError("The geometry collection does not have valid envelope bounds.")
+
 
     for xmin, ymin, xmax, ymax in generate_rectangle_cells(
         envelope.bounds[0],
