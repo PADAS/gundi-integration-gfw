@@ -11,7 +11,7 @@ from shapely.geometry import GeometryCollection, shape, mapping
 from datetime import timezone, timedelta, datetime
 
 from app.actions.configurations import AuthenticateConfig, PullEventsConfig
-from app.services.activity_logger import activity_logger, log_activity
+from app.services.activity_logger import activity_logger, log_action_activity
 from app.services.gundi import send_events_to_gundi
 from app.services.state import IntegrationStateManager
 from app.services.errors import ConfigurationNotFound
@@ -158,7 +158,7 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
                 except AttributeError:
                     msg = f"Error while creating Geostore for Geometry Collection (invalid partition)."
                     logger.exception(msg)
-                    await log_activity(
+                    await log_action_activity(
                         integration_id=integration.id,
                         action_id="pull_events",
                         level=LogLevel.WARNING,
@@ -170,7 +170,7 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
         except ValueError:
             msg = f"Error while generating geometry fragments for Geometry Collection."
             logger.exception(msg)
-            await log_activity(
+            await log_action_activity(
                 integration_id=integration.id,
                 action_id="pull_events",
                 level=LogLevel.WARNING,
