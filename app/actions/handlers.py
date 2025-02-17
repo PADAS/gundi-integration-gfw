@@ -153,10 +153,20 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
         )
         try:
             for partition in utils.generate_geometry_fragments(geometry_collection=geometry_collection):
-                geostore = await dataapi.create_geostore(geometry=mapping(partition))
-
-                await state_manager.add_geostore_id(aoi_data.id, geostore.gfw_geostore_id)
-
+                try:
+                    geostore = await dataapi.create_geostore(geometry=mapping(partition))
+                except AttributeError:
+                    msg = f"Error while creating Geostore for Geometry Collection (invalid partition)."
+                    logger.exception(msg)
+                    await log_activity(
+                        integration_id=integration.id,
+                        action_id="pull_events",
+                        level=LogLevel.WARNING,
+                        title=msg,
+                        data={"aoi_data": aoi_data.dict(), "geometry_collection": geometry_collection.wkt}
+                    )
+                else:
+                    await state_manager.add_geostore_id(aoi_data.id, geostore.gfw_geostore_id)
         except ValueError:
             msg = f"Error while generating geometry fragments for Geometry Collection."
             logger.exception(msg)
