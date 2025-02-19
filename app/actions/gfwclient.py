@@ -100,6 +100,8 @@ class DataAPIQueryException(Exception):
 class GFWClientException(Exception):
     pass
 
+class QuotaExceeded(GFWClientException):
+    pass
 
 class AOIAttributes(pydantic.BaseModel):
     name: Optional[str]
@@ -321,6 +323,11 @@ class DataAPI:
         self._auth_gen = None
         self._api_keys = []
 
+        self._quota_exceeded = {
+            DATASET_GFW_INTEGRATED_ALERTS: False,
+            DATASET_NASA_VIIRS_FIRE_ALERTS: False
+        }
+
     @backoff.on_exception(backoff.expo, (httpx.TimeoutException, httpx.HTTPStatusError), max_tries=3)
     async def get_access_token(self):
 
@@ -499,6 +506,17 @@ class DataAPI:
             if val.status == 'success':
                 return val.data
 
+    # @staticmethod
+    # def __get_alerts_predicate(r):
+    #     logger.debug(f"Response is {r}.")
+    #     return hasattr(r, 'status_codde') and r.status_code == 429
+    
+    # @backoff.on_predicate(
+    #     backoff.runtime,
+    #     predicate=__get_alerts_predicate,
+    #     value=lambda r: int(r.headers.get("Retry-After", 5*60)),
+    #     jitter=None,
+    #     )   
     @backoff.on_exception(custom_backoff, (httpx.TimeoutException, httpx.HTTPStatusError),
                           max_tries=3, 
                           on_giveup=giveup_handler, raise_on_giveup=False,
@@ -535,6 +553,11 @@ class DataAPI:
         }
 
         async def fn():
+
+            if self._quota_exceeded[dataset]:
+                logger.warning(f"Quota exceeded for dataset: {dataset}, so skipping.")
+                return
+            
             async with httpx.AsyncClient(timeout=DEFAULT_REQUEST_TIMEOUT) as client:
 
                 response = await client.get(f"{self.DATA_API_URL}/dataset/{dataset}/latest/query/json",
@@ -548,6 +571,10 @@ class DataAPI:
                     data_len = len(data.get("data"))
                     logger.info(f"Extracted {data_len} alerts from dataset {dataset}, geostore_id: {geostore_id} for period {lower_date} - {upper_date}.")
                     return data.get("data", [])
+                elif response.status_code == 429:
+                    logger.warning(f"Rate limit exceeded. Retrying in {response.headers.get('Retry-After', 'unspecified')} seconds.")
+                    self._quota_exceeded[dataset] = True
+                    raise QuotaExceeded()
                 else:
                     logger.error(
                         f"Failed getting data for dataset {dataset}. status: {response.status_code}, text: {response.text}",
@@ -600,7 +627,7 @@ class DataAPI:
             logger.warning(f"Invalid confidence value: {lowest_confidence}. Using all confidence values.")
 
         async with semaphore:
-            fields = {"confidence__cat", "alert__date", "frp__MW", "bright_ti4__K", "bright_ti5__K"}
+            fields = {"confidence__cat", "alert__date"} # ,"frp__MW", "bright_ti4__K", "bright_ti5__K"}
             alerts = await self.get_alerts(
                 dataset="nasa_viirs_fire_alerts",
                 date_field="alert__date",
