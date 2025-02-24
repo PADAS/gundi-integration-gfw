@@ -2,7 +2,7 @@ import pydantic
 
 from datetime import datetime
 
-from app.actions.core import PullActionConfiguration, AuthActionConfiguration, ExecutableActionMixin
+from app.actions.core import PullActionConfiguration, AuthActionConfiguration, ExecutableActionMixin, InternalActionConfiguration
 from app.actions.gfwclient import AOIData, DatasetResponseItem, IntegratedAlertsConfidenceEnum, NasaViirsFireAlertConfidenceEnum
 from app.services.errors import ConfigurationNotFound
 from app.services.utils import find_config_for_action, FieldWithUIOptions, UIOptions, GlobalUISchemaOptions
@@ -103,7 +103,7 @@ class PullEventsConfig(PullActionConfiguration):
     class Config:
         @staticmethod
         def schema_extra(schema: dict):
-            # Remove latitude, longitude, distance and region_code from the root properties
+            # Remove lookback days and confidence from the root properties
             schema["properties"].pop("fire_alerts_lowest_confidence", None)
             schema["properties"].pop("fire_lookback_days", None)
             schema["properties"].pop("integrated_alerts_lookback_days", None)
@@ -173,14 +173,14 @@ class PullEventsConfig(PullActionConfiguration):
             })
 
 
-class GetDatasetAndGeostoresConfig(PullActionConfiguration):
+class GetDatasetAndGeostoresConfig(InternalActionConfiguration):
     integration_id: str
     pull_events_config: PullEventsConfig
     auth_config: AuthenticateConfig
     aoi_data: AOIData
 
 
-class GetNasaVIIRSFireAlertsForGeostoreID(PullActionConfiguration):
+class GetNasaVIIRSFireAlertsForGeostoreID(InternalActionConfiguration):
     integration_id: str
     geostore_id: str
     auth_config: AuthenticateConfig
@@ -189,7 +189,7 @@ class GetNasaVIIRSFireAlertsForGeostoreID(PullActionConfiguration):
     dataset: DatasetResponseItem
 
 
-class GetIntegratedAlertsForGeostoreID(PullActionConfiguration):
+class GetIntegratedAlertsForGeostoreID(InternalActionConfiguration):
     integration_id: str
     geostore_id: str
     auth_config: AuthenticateConfig
