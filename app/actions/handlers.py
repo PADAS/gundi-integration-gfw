@@ -195,7 +195,6 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
     config = GetDatasetAndGeostoresConfig(
         integration_id=str(integration.id),
         pull_events_config=action_config,
-        auth_config=auth_config,
         aoi_data=aoi_data
     )
     await trigger_action(integration.id, "get_dataset_and_geostores", config=config)
@@ -218,9 +217,10 @@ async def action_get_integrated_alerts_for_geostore_and_date_range(
         action_config: GetIntegratedAlertsForGeostoreID
 ):
     total_alerts = 0
+    auth_config = get_auth_config(integration)
     dataapi = DataAPI(
-        username=action_config.auth_config.email,
-        password=action_config.auth_config.password.get_secret_value()
+        username=auth_config.email,
+        password=auth_config.password.get_secret_value()
     )
 
     integrated_alerts = await dataapi.get_gfw_integrated_alerts(
@@ -257,9 +257,10 @@ async def action_get_integrated_alerts_for_geostore_and_date_range(
 
 
 async def action_get_dataset_and_geostores(integration: Integration, action_config: GetDatasetAndGeostoresConfig):
+    auth_config = get_auth_config(integration)
     dataapi = DataAPI(
-        username=action_config.auth_config.email,
-        password=action_config.auth_config.password.get_secret_value()
+        username=auth_config.email,
+        password=auth_config.password.get_secret_value()
     )
 
     fire_dataset_metadata = None
@@ -297,7 +298,7 @@ async def action_get_dataset_and_geostores(integration: Integration, action_conf
                 msg,
                 extra={
                     "integration_id": str(integration.id),
-                    "integration_login": action_config.auth_config.email,
+                    "integration_login": auth_config.email,
                     "dataset_updated_on": fire_dataset_metadata.updated_on.isoformat(),
                 },
             )
@@ -333,7 +334,7 @@ async def action_get_dataset_and_geostores(integration: Integration, action_conf
                 msg,
                 extra={
                     "integration_id": str(integration.id),
-                    "integration_login": action_config.auth_config.email,
+                    "integration_login": auth_config.email,
                     "dataset_updated_on": integrated_dataset_metadata.updated_on.isoformat(),
                 },
             )
@@ -352,7 +353,6 @@ async def action_get_dataset_and_geostores(integration: Integration, action_conf
                 # Trigger "get_nasa_viirs_fire_alerts" sub-action
                 config = GetNasaVIIRSFireAlertsForGeostoreID(
                     integration_id=str(integration.id),
-                    auth_config=action_config.auth_config,
                     geostore_id=geostore_id.decode('utf8'),
                     date_range=(lower, upper),
                     lowest_confidence=action_config.pull_events_config.fire_alerts_lowest_confidence,
@@ -370,7 +370,6 @@ async def action_get_dataset_and_geostores(integration: Integration, action_conf
                 # Trigger "get_gfw_integrated_alerts" sub-action
                 config = GetIntegratedAlertsForGeostoreID(
                     integration_id=str(integration.id),
-                    auth_config=action_config.auth_config,
                     geostore_id=geostore_id.decode('utf8'),
                     date_range=(lower, upper),
                     lowest_confidence=action_config.pull_events_config.integrated_alerts_lowest_confidence,
@@ -395,9 +394,10 @@ async def action_get_nasa_viirs_fire_alerts_for_geostore_and_date_range(
         action_config: GetNasaVIIRSFireAlertsForGeostoreID
 ):
     total_alerts = 0
+    auth_config = get_auth_config(integration)
     dataapi = DataAPI(
-        username=action_config.auth_config.email,
-        password=action_config.auth_config.password.get_secret_value()
+        username=auth_config.email,
+        password=auth_config.password.get_secret_value()
     )
     fire_alerts = await dataapi.get_nasa_viirs_fire_alerts(
         geostore_id=action_config.geostore_id,

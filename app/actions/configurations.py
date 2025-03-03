@@ -176,14 +176,12 @@ class PullEventsConfig(PullActionConfiguration):
 class GetDatasetAndGeostoresConfig(InternalActionConfiguration):
     integration_id: str
     pull_events_config: PullEventsConfig
-    auth_config: AuthenticateConfig
     aoi_data: AOIData
 
 
 class GetNasaVIIRSFireAlertsForGeostoreID(InternalActionConfiguration):
     integration_id: str
     geostore_id: str
-    auth_config: AuthenticateConfig
     date_range: tuple[datetime, datetime]
     lowest_confidence: NasaViirsFireAlertConfidenceEnum
     dataset: DatasetResponseItem
@@ -192,7 +190,6 @@ class GetNasaVIIRSFireAlertsForGeostoreID(InternalActionConfiguration):
 class GetIntegratedAlertsForGeostoreID(InternalActionConfiguration):
     integration_id: str
     geostore_id: str
-    auth_config: AuthenticateConfig
     date_range: tuple[datetime, datetime]
     lowest_confidence: IntegratedAlertsConfidenceEnum
     dataset: DatasetResponseItem
