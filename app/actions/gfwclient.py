@@ -565,7 +565,7 @@ class DataAPI:
         try:
             index = IntegratedAlertsConfidenceEnumOrder.index(lowest_confidence)
             confidence_values = IntegratedAlertsConfidenceEnumOrder[index:] 
-            confidence_values = ' OR '.join(f'gfw_integrated_alerts__confidence = \'{value}\'' for value in confidence_values)
+            confidence_values = ' OR '.join(f'gfw_integrated_alerts__confidence = \'{confidence_value.value}\'' for confidence_value in confidence_values)
             extra_where = f"({confidence_values})"
         except ValueError:
             extra_where = ''
@@ -592,7 +592,7 @@ class DataAPI:
         try:
             index = NasaViirsFireAlertConfidenceEnumOrder.index(lowest_confidence)
             confidence_values = NasaViirsFireAlertConfidenceEnumOrder[index:] 
-            confidence_values = [str(value).lower()[:1] for value in confidence_values]
+            confidence_values = [str(confidence_value.value).lower()[:1] for confidence_value in confidence_values]
             confidence_values = ' OR '.join(f'confidence__cat = \'{value}\'' for value in confidence_values)
             extra_where = f"({confidence_values})"
         except ValueError:

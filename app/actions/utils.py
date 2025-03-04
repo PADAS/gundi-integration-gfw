@@ -1,4 +1,8 @@
+import logging
 import shapely.geometry
+
+
+logger = logging.getLogger(__name__)
 
 
 def generate_rectangle_cells(xmin, ymin, xmax, ymax, interval=0.3):
@@ -21,6 +25,13 @@ def generate_geometry_fragments(geometry_collection, interval=1.0):
         geometry_collection = geometry_collection.buffer(0)
 
     envelope = geometry_collection.envelope
+
+    # Check if envelope has valid bounds
+    if not envelope.bounds:
+        logger.error(f"Geometry collection has no bounds: {geometry_collection}")
+        raise ValueError("The geometry collection does not have valid envelope bounds.")
+
+
     for xmin, ymin, xmax, ymax in generate_rectangle_cells(
         envelope.bounds[0],
         envelope.bounds[1],
