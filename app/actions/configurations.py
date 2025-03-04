@@ -87,24 +87,29 @@ class PullEventsConfig(PullActionConfiguration):
         description="Force fetch even if in a quiet period."
     )
 
-    partition_interval_size_in_degrees: float = pydantic.Field(
+    partition_interval_size_in_degrees: float = FieldWithUIOptions(
         1.0,
         title="Partition interval size in degrees",
         description="Size of the partition interval in degrees.",
-        max=1.0,
-        min=0.3
+        le=1.0,
+        ge=0.1,
+        multiple_of=0.01,
+        # ui_options=UIOptions(
+        #     widget="range",  # This will be rendered ad a range slider
+        # )
+        # TODO: Check the hardcoded step in the UI
     )
 
     ui_global_options: GlobalUISchemaOptions = GlobalUISchemaOptions(
         order=[
             "gfw_share_link_url",
+            "partition_interval_size_in_degrees",
             "include_fire_alerts",
             "fire_lookback_days",
             "fire_alerts_lowest_confidence",
             "include_integrated_alerts",
             "integrated_alerts_lookback_days",
             "integrated_alerts_lowest_confidence",
-            "partition_interval_size_in_degrees",
             "force_fetch"
         ],
     )
