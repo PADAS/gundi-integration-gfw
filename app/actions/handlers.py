@@ -159,8 +159,10 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
                 for feature in geostore.attributes.geojson["features"]
             ]
         )
+
         try:
-            for partition in utils.generate_geometry_fragments(geometry_collection=geometry_collection):
+            for partition in utils.generate_geometry_fragments(geometry_collection=geometry_collection, 
+                                                           interval=action_config.partition_interval_size_in_degrees):
                 try:
                     geostore = await dataapi.create_geostore(geometry=mapping(partition))
                 except AttributeError:
@@ -186,9 +188,6 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
                 data={"aoi_data": aoi_data.dict(), "geometry_collection": geometry_collection.wkt}
             )
 
-
-
-
         await state_manager.set_geostores_id_ttl(aoi_data.id, 86400*7)
 
     # Trigger "get_dataset_and_geostores" sub-action
@@ -199,7 +198,7 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
     )
     await trigger_action(integration.id, "get_dataset_and_geostores", config=config)
 
-    quiet_minutes = random.randint(60, 180) # Todo: change to be more fair.
+    quiet_minutes = random.randint(240, 720) # Todo: change to be more fair.
     await state_manager.set_quiet_period(str(integration.id), "pull_events", timedelta(minutes=quiet_minutes))
 
     result["message"] = "'get_dataset_and_geostores' action triggered successfully."
