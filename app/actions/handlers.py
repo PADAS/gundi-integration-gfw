@@ -245,13 +245,6 @@ async def action_get_integrated_alerts_for_geostore_and_date_range(
         latest_updated_on=action_config.dataset.updated_on
     )
 
-    await state_manager.set_state(
-        str(integration.id),
-        "pull_events",
-        dataset_status.dict(),
-        source_id=DATASET_GFW_INTEGRATED_ALERTS
-    )
-
     return {"dataset": DATASET_GFW_INTEGRATED_ALERTS, "response": dataset_status.dict(), "total_alerts": total_alerts}
 
 
@@ -283,6 +276,7 @@ async def action_get_dataset_and_geostores(integration: Integration, action_conf
         )
 
         if fire_dataset_status:
+            logger.info(f"Saved fire dataset status: {fire_dataset_status}")
             fire_dataset_status = DatasetStatus.parse_obj(fire_dataset_status)
         else:
             fire_dataset_status = DatasetStatus(
@@ -319,6 +313,7 @@ async def action_get_dataset_and_geostores(integration: Integration, action_conf
         )
 
         if integrated_dataset_status:
+            logger.info(f"Saved integrated dataset status: {integrated_dataset_status}")
             integrated_dataset_status = DatasetStatus.parse_obj(integrated_dataset_status)
         else:
             integrated_dataset_status = DatasetStatus(
@@ -382,6 +377,35 @@ async def action_get_dataset_and_geostores(integration: Integration, action_conf
                 )
                 integrated_alerts_actions_triggered += 1
 
+    # Save status for both datasets.
+    if fire_dataset_metadata:
+        fire_dataset_status = DatasetStatus(
+            dataset=fire_dataset_metadata.dataset,
+            version=fire_dataset_metadata.version,
+            latest_updated_on=fire_dataset_metadata.updated_on
+        )
+
+        await state_manager.set_state(
+            str(integration.id),
+            "pull_events",
+            fire_dataset_status.dict(),
+            source_id=DATASET_NASA_VIIRS_FIRE_ALERTS
+        )
+
+    if integrated_dataset_metadata:
+        integrated_dataset_status = DatasetStatus(
+            dataset=integrated_dataset_metadata.dataset,
+            version=integrated_dataset_metadata.version,
+            latest_updated_on=integrated_dataset_metadata.updated_on
+        )
+
+        await state_manager.set_state(
+            str(integration.id),
+            "pull_events",
+            integrated_dataset_status.dict(),
+            source_id=DATASET_GFW_INTEGRATED_ALERTS
+        )
+
     return {
         "fire_alerts_actions_triggered": fire_alerts_actions_triggered,
         "integrated_alerts_actions_triggered": integrated_alerts_actions_triggered
@@ -419,13 +443,6 @@ async def action_get_nasa_viirs_fire_alerts_for_geostore_and_date_range(
         dataset=action_config.dataset.dataset,
         version=action_config.dataset.version,
         latest_updated_on=action_config.dataset.updated_on
-    )
-
-    await state_manager.set_state(
-        str(integration.id),
-        "pull_events",
-        dataset_status.dict(),
-        source_id=DATASET_NASA_VIIRS_FIRE_ALERTS
     )
 
     return {"dataset": DATASET_NASA_VIIRS_FIRE_ALERTS, "response": dataset_status.dict(), "total_alerts": total_alerts}
