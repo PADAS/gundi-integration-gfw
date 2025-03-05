@@ -342,7 +342,7 @@ async def action_get_dataset_and_geostores(integration: Integration, action_conf
             integrated_dataset_metadata = None
 
     # Check if any of the datasets is valid to trigger sub-actions
-    if fire_dataset_metadata or integrated_dataset_metadata:
+    if any([fire_dataset_metadata, integrated_dataset_metadata]):
         for geostore_id in geostore_ids:
             for lower, upper in generate_date_pairs(start_date, end_date):
                 if fire_dataset_metadata:
