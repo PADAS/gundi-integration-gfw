@@ -341,41 +341,43 @@ async def action_get_dataset_and_geostores(integration: Integration, action_conf
             )
             integrated_dataset_metadata = None
 
-    for geostore_id in geostore_ids:
-        for lower, upper in generate_date_pairs(start_date, end_date):
-            if fire_dataset_metadata:
-                # Trigger "get_nasa_viirs_fire_alerts" sub-action
-                config = GetNasaVIIRSFireAlertsForGeostoreID(
-                    integration_id=str(integration.id),
-                    geostore_id=geostore_id.decode('utf8'),
-                    date_range=(lower, upper),
-                    lowest_confidence=action_config.pull_events_config.fire_alerts_lowest_confidence,
-                    dataset=fire_dataset_metadata
-                )
+    # Check if any of the datasets is valid to trigger sub-actions
+    if fire_dataset_metadata or integrated_dataset_metadata:
+        for geostore_id in geostore_ids:
+            for lower, upper in generate_date_pairs(start_date, end_date):
+                if fire_dataset_metadata:
+                    # Trigger "get_nasa_viirs_fire_alerts" sub-action
+                    config = GetNasaVIIRSFireAlertsForGeostoreID(
+                        integration_id=str(integration.id),
+                        geostore_id=geostore_id.decode('utf8'),
+                        date_range=(lower, upper),
+                        lowest_confidence=action_config.pull_events_config.fire_alerts_lowest_confidence,
+                        dataset=fire_dataset_metadata
+                    )
 
-                await trigger_action(
-                    integration.id,
-                    "get_nasa_viirs_fire_alerts_for_geostore_and_date_range",
-                    config=config
-                )
-                fire_alerts_actions_triggered += 1
+                    await trigger_action(
+                        integration.id,
+                        "get_nasa_viirs_fire_alerts_for_geostore_and_date_range",
+                        config=config
+                    )
+                    fire_alerts_actions_triggered += 1
 
-            if integrated_dataset_metadata:
-                # Trigger "get_gfw_integrated_alerts" sub-action
-                config = GetIntegratedAlertsForGeostoreID(
-                    integration_id=str(integration.id),
-                    geostore_id=geostore_id.decode('utf8'),
-                    date_range=(lower, upper),
-                    lowest_confidence=action_config.pull_events_config.integrated_alerts_lowest_confidence,
-                    dataset=integrated_dataset_metadata
-                )
+                if integrated_dataset_metadata:
+                    # Trigger "get_gfw_integrated_alerts" sub-action
+                    config = GetIntegratedAlertsForGeostoreID(
+                        integration_id=str(integration.id),
+                        geostore_id=geostore_id.decode('utf8'),
+                        date_range=(lower, upper),
+                        lowest_confidence=action_config.pull_events_config.integrated_alerts_lowest_confidence,
+                        dataset=integrated_dataset_metadata
+                    )
 
-                await trigger_action(
-                    integration.id,
-                    "get_integrated_alerts_for_geostore_and_date_range",
-                    config=config
-                )
-                integrated_alerts_actions_triggered += 1
+                    await trigger_action(
+                        integration.id,
+                        "get_integrated_alerts_for_geostore_and_date_range",
+                        config=config
+                    )
+                    integrated_alerts_actions_triggered += 1
 
     # Save status for both datasets.
     if fire_dataset_metadata:
