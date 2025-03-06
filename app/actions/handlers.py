@@ -2,6 +2,7 @@ import asyncio
 import httpx
 import logging
 import random
+import pydantic
 import app.settings
 
 from app.actions import utils
@@ -277,7 +278,16 @@ async def action_get_dataset_and_geostores(integration: Integration, action_conf
 
         if fire_dataset_status:
             logger.info(f"Saved fire dataset status: {fire_dataset_status}")
-            fire_dataset_status = DatasetStatus.parse_obj(fire_dataset_status)
+            try:
+                fire_dataset_status = DatasetStatus.parse_obj(fire_dataset_status)
+            except pydantic.ValidationError:
+                logger.exception(
+                    f"Invalid fire dataset status: {fire_dataset_status}. Setting it from metadata..."
+                )
+                fire_dataset_status = DatasetStatus(
+                    dataset=fire_dataset_metadata.dataset,
+                    version=fire_dataset_metadata.version,
+                )
         else:
             fire_dataset_status = DatasetStatus(
                 dataset=fire_dataset_metadata.dataset,
@@ -314,7 +324,16 @@ async def action_get_dataset_and_geostores(integration: Integration, action_conf
 
         if integrated_dataset_status:
             logger.info(f"Saved integrated dataset status: {integrated_dataset_status}")
-            integrated_dataset_status = DatasetStatus.parse_obj(integrated_dataset_status)
+            try:
+                integrated_dataset_status = DatasetStatus.parse_obj(integrated_dataset_status)
+            except pydantic.ValidationError:
+                logger.exception(
+                    f"Invalid integrated dataset status: {integrated_dataset_status}. Setting it from metadata..."
+                )
+                integrated_dataset_status = DatasetStatus(
+                    dataset=integrated_dataset_metadata.dataset,
+                    version=integrated_dataset_metadata.version,
+                )
         else:
             integrated_dataset_status = DatasetStatus(
                 dataset=integrated_dataset_metadata.dataset,
