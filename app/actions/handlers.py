@@ -2,7 +2,6 @@ import asyncio
 import httpx
 import logging
 import random
-import pydantic
 import app.settings
 
 from app.actions import utils
@@ -25,6 +24,7 @@ from app.services.gundi import send_events_to_gundi
 from app.services.state import IntegrationStateManager
 
 from gundi_core.schemas.v2 import Integration, LogLevel
+from pydantic import ValidationError
 
 GFW_INTEGRATED_ALERTS = "gfwgladalert"
 GFW_FIRE_ALERT = "gfwfirealert"
@@ -280,7 +280,7 @@ async def action_get_dataset_and_geostores(integration: Integration, action_conf
             logger.info(f"Saved fire dataset status: {fire_dataset_status}")
             try:
                 fire_dataset_status = DatasetStatus.parse_obj(fire_dataset_status)
-            except pydantic.ValidationError:
+            except ValidationError:
                 logger.exception(
                     f"Invalid fire dataset status: {fire_dataset_status}. Setting it from metadata..."
                 )
@@ -326,7 +326,7 @@ async def action_get_dataset_and_geostores(integration: Integration, action_conf
             logger.info(f"Saved integrated dataset status: {integrated_dataset_status}")
             try:
                 integrated_dataset_status = DatasetStatus.parse_obj(integrated_dataset_status)
-            except pydantic.ValidationError:
+            except ValidationError:
                 logger.exception(
                     f"Invalid integrated dataset status: {integrated_dataset_status}. Setting it from metadata..."
                 )
