@@ -45,5 +45,9 @@ def generate_geometry_fragments(geometry_collection, interval=1.0):
 
         intersection = rectangle_shape.intersection(geometry_collection)
         if not intersection.is_empty:
-            yield intersection if intersection.geometryType() == 'Polygon' else intersection.convex_hull
-
+            if intersection.geom_type == 'Polygon':
+                yield intersection
+            elif intersection.geom_type in ['MultiPolygon', 'GeometryCollection']:
+                for geom in intersection.geoms:
+                    if geom.geom_type == 'Polygon' and not geom.is_empty:
+                        yield geom
