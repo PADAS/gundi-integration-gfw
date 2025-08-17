@@ -84,7 +84,7 @@ def generate_geometry_fragments(geometry_collection, interval=1.0):
         raise ValueError("The geometry collection does not have valid envelope bounds.")
 
     # Calculate adaptive interval based on area size
-    area_ha = geometry_collection.area * 111 * 111  # Rough conversion to hectares
+    area_ha = geometry_collection.area * DEGREES_TO_HECTARES_FACTOR  # Rough conversion to hectares
     adaptive_interval = calculate_adaptive_interval(area_ha, interval)
     
     logger.debug(f"Geometry area: {area_ha:.2f} ha, using interval: {adaptive_interval}")
