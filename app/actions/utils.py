@@ -146,7 +146,11 @@ def optimize_geometry_partitioning(geometry_collection, max_partitions: int = 10
     target_area_per_partition = area_ha / max_partitions
     
     # Calculate optimal interval based on target area
-    optimal_interval = (target_area_per_partition / (111 * 111)) ** 0.5
+    area_ha = geometry_collection.area * DEGREE_SQ_TO_HECTARE
+    target_area_per_partition = area_ha / max_partitions
+    
+    # Calculate optimal interval based on target area
+    optimal_interval = (target_area_per_partition / DEGREE_SQ_TO_HECTARE) ** 0.5
     
     # Ensure interval is within reasonable bounds
     optimal_interval = max(0.1, min(2.0, optimal_interval))
