@@ -20,7 +20,7 @@ DATASET_NASA_VIIRS_FIRE_ALERTS = "nasa_viirs_fire_alerts"
 
 # Cache for dataset metadata to avoid repeated API calls
 _dataset_metadata_cache = {}
-_metadata_cache_ttl = 3600  # 1 hour cache TTL
+_metadata_cache_ttl = GFW_METADATA_CACHE_TTL  # Use config-defined cache TTL
 
 def random_string(n=4):
     return "".join(random.sample([chr(x) for x in range(97, 97 + 26)], n))
