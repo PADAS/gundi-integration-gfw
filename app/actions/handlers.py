@@ -162,8 +162,10 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
         )
 
         try:
-            for partition in utils.generate_geometry_fragments(geometry_collection=geometry_collection, 
-                                                           interval=action_config.partition_interval_size_in_degrees):
+            for partition in utils.optimize_geometry_partitioning(
+                geometry_collection=geometry_collection, 
+                max_partitions=action_config.max_partitions
+            ):
                 try:
                     geostore = await dataapi.create_geostore(geometry=mapping(partition))
                 except AttributeError:

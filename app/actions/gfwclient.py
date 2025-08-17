@@ -7,16 +7,20 @@ import random
 import re
 import backoff
 from enum import Enum
-
-import httpx
+from functools import lru_cache
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Set, Tuple, Dict, Any
 
+import httpx
 
 logger = logging.getLogger(__name__)
 
 DATASET_GFW_INTEGRATED_ALERTS = "gfw_integrated_alerts"
 DATASET_NASA_VIIRS_FIRE_ALERTS = "nasa_viirs_fire_alerts"
+
+# Cache for dataset metadata to avoid repeated API calls
+_dataset_metadata_cache = {}
+_metadata_cache_ttl = 3600  # 1 hour cache TTL
 
 def random_string(n=4):
     return "".join(random.sample([chr(x) for x in range(97, 97 + 26)], n))
@@ -583,6 +587,143 @@ class DataAPI:
             )
         
         return [IntegratedAlert.parse_obj(alert) for alert in alerts] if alerts else []
+
+    @backoff.on_exception(backoff.expo, (httpx.TimeoutException, httpx.HTTPStatusError), max_tries=3, on_backoff=backoff_hdlr)
+    async def get_gfw_integrated_alerts_batch(
+        self, 
+        *, 
+        geostore_ids: List[str], 
+        date_range: Tuple[datetime, datetime],
+        lowest_confidence: IntegratedAlertsConfidenceEnum = IntegratedAlertsConfidenceEnum.highest,
+        semaphore: asyncio.Semaphore = None,
+        max_concurrent: int = 5
+    ) -> Dict[str, List[IntegratedAlert]]:
+        """
+        Get GFW Integrated Alerts for multiple geostores concurrently.
+        
+        Args:
+            geostore_ids: List of geostore IDs to query
+            date_range: Date range for the query
+            lowest_confidence: Minimum confidence level
+            semaphore: Semaphore for rate limiting
+            max_concurrent: Maximum concurrent requests
+            
+        Returns:
+            Dictionary mapping geostore_id to list of alerts
+        """
+        if not geostore_ids:
+            return {}
+            
+        # Create a semaphore for this batch if none provided
+        batch_semaphore = semaphore or asyncio.Semaphore(max_concurrent)
+        
+        async def fetch_single_geostore(geostore_id: str) -> Tuple[str, List[IntegratedAlert]]:
+            try:
+                alerts = await self.get_gfw_integrated_alerts(
+                    geostore_id=geostore_id,
+                    date_range=date_range,
+                    lowest_confidence=lowest_confidence,
+                    semaphore=batch_semaphore
+                )
+                return geostore_id, alerts
+            except Exception as e:
+                logger.error(f"Failed to fetch alerts for geostore {geostore_id}: {e}")
+                return geostore_id, []
+        
+        # Process all geostores concurrently
+        tasks = [fetch_single_geostore(geostore_id) for geostore_id in geostore_ids]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Convert results to dictionary
+        alerts_by_geostore = {}
+        for result in results:
+            if isinstance(result, Exception):
+                logger.error(f"Task failed with exception: {result}")
+                continue
+            geostore_id, alerts = result
+            alerts_by_geostore[geostore_id] = alerts
+            
+        total_alerts = sum(len(alerts) for alerts in alerts_by_geostore.values())
+        logger.info(f"Batch query completed: {len(geostore_ids)} geostores, {total_alerts} total alerts")
+        
+        return alerts_by_geostore
+        
+    async def get_gfw_integrated_alerts_optimized(
+        self,
+        *,
+        geostore_ids: List[str],
+        date_range: Tuple[datetime, datetime],
+        lowest_confidence: IntegratedAlertsConfidenceEnum = IntegratedAlertsConfidenceEnum.highest,
+        semaphore: asyncio.Semaphore = None,
+        max_concurrent: int = 5,
+        enable_smart_dates: bool = True,
+        max_days_per_query: int = 7
+    ) -> Dict[str, List[IntegratedAlert]]:
+        """
+        Optimized method to retrieve GFW Integrated Alerts with all optimizations applied.
+        
+        This method combines:
+        - Smart date range optimization
+        - Batch processing
+        - Metadata caching
+        - Concurrent processing
+        
+        Args:
+            geostore_ids: List of geostore IDs to query
+            date_range: Date range for the query
+            lowest_confidence: Minimum confidence level
+            semaphore: Semaphore for rate limiting
+            max_concurrent: Maximum concurrent requests
+            enable_smart_dates: Whether to use smart date range optimization
+            max_days_per_query: Maximum days per query
+            
+        Returns:
+            Dictionary mapping geostore_id to list of alerts
+        """
+        if not geostore_ids:
+            return {}
+            
+        # Step 1: Optimize date ranges if enabled
+        if enable_smart_dates:
+            try:
+                date_ranges = await self.optimize_date_range_for_dataset(
+                    dataset="gfw_integrated_alerts",
+                    requested_start=date_range[0],
+                    requested_end=date_range[1],
+                    max_days_per_query=max_days_per_query
+                )
+            except Exception as e:
+                logger.warning(f"Smart date optimization failed, using original range: {e}")
+                date_ranges = [date_range]
+        else:
+            date_ranges = [date_range]
+            
+        # Step 2: Process each date range with batch processing
+        all_alerts = {}
+        batch_semaphore = semaphore or asyncio.Semaphore(max_concurrent)
+        
+        for date_range_chunk in date_ranges:
+            logger.info(f"Processing date range: {date_range_chunk[0]} to {date_range_chunk[1]}")
+            
+            chunk_alerts = await self.get_gfw_integrated_alerts_batch(
+                geostore_ids=geostore_ids,
+                date_range=date_range_chunk,
+                lowest_confidence=lowest_confidence,
+                semaphore=batch_semaphore,
+                max_concurrent=max_concurrent
+            )
+            
+            # Merge results
+            for geostore_id, alerts in chunk_alerts.items():
+                if geostore_id not in all_alerts:
+                    all_alerts[geostore_id] = []
+                all_alerts[geostore_id].extend(alerts)
+                
+        # Step 3: Log summary
+        total_alerts = sum(len(alerts) for alerts in all_alerts.values())
+        logger.info(f"Optimized query completed: {len(geostore_ids)} geostores, {len(date_ranges)} date ranges, {total_alerts} total alerts")
+        
+        return all_alerts
         
     @backoff.on_exception(backoff.expo, (httpx.TimeoutException, httpx.HTTPStatusError), max_tries=3, on_backoff=backoff_hdlr)
     async def get_nasa_viirs_fire_alerts(self, *, geostore_id: str,date_range: Tuple[datetime, datetime],
@@ -616,7 +757,18 @@ class DataAPI:
 
     @backoff.on_exception(backoff.expo, (httpx.TimeoutException, httpx.HTTPStatusError), max_tries=3)
     async def get_dataset_metadata(self, dataset: str = "", version: str = "latest"):
-
+        """Get dataset metadata with caching to reduce API calls."""
+        cache_key = f"{dataset}_{version}"
+        current_time = datetime.now(tz=timezone.utc)
+        
+        # Check cache first
+        if cache_key in _dataset_metadata_cache:
+            cached_data, cache_time = _dataset_metadata_cache[cache_key]
+            if (current_time - cache_time).total_seconds() < _metadata_cache_ttl:
+                logger.debug(f"Using cached metadata for dataset {dataset}")
+                return cached_data
+        
+        # Fetch from API if not cached or expired
         api_keys = await self.get_api_keys()
         headers = {"x-api-key": api_keys[0].api_key}
 
@@ -629,7 +781,81 @@ class DataAPI:
 
             if httpx.codes.is_success(response.status_code):
                 data = response.json()
-                return DatasetResponseItem.parse_obj(data.get("data"))
+                metadata = DatasetResponseItem.parse_obj(data.get("data"))
+                
+                # Cache the result
+                _dataset_metadata_cache[cache_key] = (metadata, current_time)
+                logger.debug(f"Cached metadata for dataset {dataset}")
+                
+                return metadata
+
+    async def optimize_date_range_for_dataset(
+        self, 
+        dataset: str, 
+        requested_start: datetime, 
+        requested_end: datetime,
+        max_days_per_query: int = 7
+    ) -> List[Tuple[datetime, datetime]]:
+        """
+        Optimize date ranges for dataset queries based on update frequency and data availability.
+        
+        Args:
+            dataset: Dataset name
+            requested_start: Requested start date
+            requested_end: Requested end date
+            max_days_per_query: Maximum days per query
+            
+        Returns:
+            List of optimized date ranges
+        """
+        try:
+            metadata = await self.get_dataset_metadata(dataset)
+            
+            # Calculate optimal chunk size based on update frequency
+            update_frequency = getattr(metadata, 'update_frequency', 'Daily')
+            chunk_size = self._calculate_chunk_size(update_frequency, max_days_per_query)
+            
+            # Generate optimized date ranges
+            date_ranges = []
+            current_start = requested_start
+            
+            while current_start < requested_end:
+                current_end = min(current_start + timedelta(days=chunk_size), requested_end)
+                date_ranges.append((current_start, current_end))
+                current_start = current_end
+                
+            logger.info(f"Optimized date ranges for {dataset}: {len(date_ranges)} chunks of {chunk_size} days each")
+            return date_ranges
+            
+        except Exception as e:
+            logger.warning(f"Failed to optimize date range for {dataset}, using fallback: {e}")
+            # Fallback to simple chunking
+            return self._simple_date_chunking(requested_start, requested_end, max_days_per_query)
+    
+    def _calculate_chunk_size(self, update_frequency: str, max_days: int) -> int:
+        """Calculate optimal chunk size based on update frequency."""
+        frequency_lower = update_frequency.lower()
+        
+        if 'daily' in frequency_lower:
+            return min(7, max_days)  # Daily updates: 7-day chunks
+        elif 'weekly' in frequency_lower:
+            return min(14, max_days)  # Weekly updates: 14-day chunks
+        elif 'monthly' in frequency_lower:
+            return min(30, max_days)  # Monthly updates: 30-day chunks
+        else:
+            return min(7, max_days)  # Default: 7-day chunks
+    
+    def _simple_date_chunking(self, start: datetime, end: datetime, max_days: int) -> List[Tuple[datetime, datetime]]:
+        """Simple date chunking fallback."""
+        date_ranges = []
+        current_start = start
+        
+        while current_start < end:
+            current_end = min(current_start + timedelta(days=max_days), end)
+            date_ranges.append((current_start, current_end))
+            current_start = current_end
+            
+        return date_ranges
 
 
     @backoff.on_exception(backoff.constant, httpx.HTTPError, max_tries=3, interval=10)

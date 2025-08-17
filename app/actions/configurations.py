@@ -100,10 +100,22 @@ class PullEventsConfig(PullActionConfiguration):
         # TODO: Check the hardcoded step in the UI
     )
 
+    max_partitions: int = FieldWithUIOptions(
+        10,
+        title="Maximum partitions per AOI",
+        description="Maximum number of geometry partitions to create for large areas. Higher values create more partitions but may increase processing time.",
+        le=50,
+        ge=1,
+        ui_options=UIOptions(
+            widget="range",  # This will be rendered as a range slider
+        )
+    )
+
     ui_global_options: GlobalUISchemaOptions = GlobalUISchemaOptions(
         order=[
             "gfw_share_link_url",
             "partition_interval_size_in_degrees",
+            "max_partitions",
             "include_fire_alerts",
             "fire_lookback_days",
             "fire_alerts_lowest_confidence",
