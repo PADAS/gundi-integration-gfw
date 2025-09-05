@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
+DEGREES_TO_HECTARES_FACTOR = 111 * 111
 
 class PerformanceMonitor:
     """Monitor performance metrics for data retrieval operations."""
@@ -83,18 +84,12 @@ def generate_geometry_fragments(geometry_collection, interval=1.0):
         logger.error(f"Geometry collection has no bounds: {geometry_collection}")
         raise ValueError("The geometry collection does not have valid envelope bounds.")
 
-    # Calculate adaptive interval based on area size
-    area_ha = geometry_collection.area * DEGREES_TO_HECTARES_FACTOR  # Rough conversion to hectares
-    adaptive_interval = calculate_adaptive_interval(area_ha, interval)
-    
-    logger.debug(f"Geometry area: {area_ha:.2f} ha, using interval: {adaptive_interval}")
-
     for xmin, ymin, xmax, ymax in generate_rectangle_cells(
         envelope.bounds[0],
         envelope.bounds[1],
         envelope.bounds[2],
         envelope.bounds[3],
-        interval=adaptive_interval,
+        interval=interval,
     ):
         rectangle_shape = shapely.geometry.Polygon(
             [(xmin, ymin), (xmin, ymax), (xmax, ymax), (xmax, ymin)]
@@ -110,51 +105,3 @@ def generate_geometry_fragments(geometry_collection, interval=1.0):
                         yield geom
 
 
-def calculate_adaptive_interval(area_ha: float, base_interval: float = 1.0) -> float:
-    """
-    Calculate adaptive interval based on area size to optimize partition count.
-    
-    Args:
-        area_ha: Area in hectares
-        base_interval: Base interval in degrees
-    
-    Returns:
-        Optimized interval in degrees
-    """
-    if area_ha < 1000:  # Small areas (< 1000 ha)
-        return base_interval * 2.0  # Larger intervals for small areas
-    elif area_ha < 10000:  # Medium areas (1000-10000 ha)
-        return base_interval * 1.5
-    elif area_ha < 100000:  # Large areas (10000-100000 ha)
-        return base_interval
-    else:  # Very large areas (> 100000 ha)
-        return base_interval * 0.5  # Smaller intervals for very large areas
-
-
-def optimize_geometry_partitioning(geometry_collection, max_partitions: int = 10) -> Generator:
-    """
-    Optimize geometry partitioning to limit the number of partitions.
-    
-    Args:
-        geometry_collection: The geometry to partition
-        max_partitions: Maximum number of partitions to create
-    
-    Yields:
-        Optimized geometry fragments
-    """
-    area_ha = geometry_collection.area * 111 * 111
-    target_area_per_partition = area_ha / max_partitions
-    
-    # Calculate optimal interval based on target area
-    area_ha = geometry_collection.area * DEGREE_SQ_TO_HECTARE
-    target_area_per_partition = area_ha / max_partitions
-    
-    # Calculate optimal interval based on target area
-    optimal_interval = (target_area_per_partition / DEGREE_SQ_TO_HECTARE) ** 0.5
-    
-    # Ensure interval is within reasonable bounds
-    optimal_interval = max(0.1, min(2.0, optimal_interval))
-    
-    logger.info(f"Optimizing partitioning: area={area_ha:.2f}ha, target_partitions={max_partitions}, interval={optimal_interval:.3f}")
-    
-    return generate_geometry_fragments(geometry_collection, interval=optimal_interval)

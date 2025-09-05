@@ -162,7 +162,7 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
         )
 
         try:
-            for partition in utils.optimize_geometry_partitioning(
+            for partition in utils.generate_geometry_fragments(
                 geometry_collection=geometry_collection, 
                 max_partitions=action_config.max_partitions
             ):

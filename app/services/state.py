@@ -72,6 +72,32 @@ class IntegrationStateManager:
                     ttl
                 )
 
+    async def set_metadata_with_ttl(self, dataset: str, version: str, metadata: dict, ttl: int):
+        """Set metadata with TTL for caching."""
+        key = f"metadata_cache.{dataset}.{version}"
+        for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
+            with attempt:
+                await self.db_client.setex(
+                    key,
+                    ttl,
+                    json.dumps(metadata, default=str)
+                )
+
+    async def get_metadata(self, dataset: str, version: str = "latest") -> dict:
+        """Get metadata from cache."""
+        key = f"metadata_cache.{dataset}.{version}"
+        for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
+            with attempt:
+                json_value = await self.db_client.get(key)
+        return json.loads(json_value) if json_value else None
+
+    async def delete_metadata(self, dataset: str, version: str = "latest"):
+        """Delete metadata from cache."""
+        key = f"metadata_cache.{dataset}.{version}"
+        for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
+            with attempt:
+                await self.db_client.delete(key)
+
     def __str__(self):
         return f"IntegrationStateManager(host={self.db_client.host}, port={self.db_client.port}, db={self.db_client.db})"
 

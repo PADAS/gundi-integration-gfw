@@ -6,6 +6,7 @@ import pydantic
 import random
 import re
 import backoff
+import stamina
 from enum import Enum
 from functools import lru_cache
 from datetime import datetime, timedelta, timezone
@@ -13,14 +14,27 @@ from typing import Optional, List, Set, Tuple, Dict, Any
 
 import httpx
 
+from app.settings import GFW_METADATA_CACHE_TTL
+from app.services.state import IntegrationStateManager
+
 logger = logging.getLogger(__name__)
 
 DATASET_GFW_INTEGRATED_ALERTS = "gfw_integrated_alerts"
 DATASET_NASA_VIIRS_FIRE_ALERTS = "nasa_viirs_fire_alerts"
 
-# Cache for dataset metadata to avoid repeated API calls
-_dataset_metadata_cache = {}
-_metadata_cache_ttl = GFW_METADATA_CACHE_TTL  # Use config-defined cache TTL
+# Global state manager instance for metadata caching
+_metadata_state_manager = IntegrationStateManager()
+
+
+async def clear_metadata_cache(dataset: str = None, version: str = "latest"):
+    """Clear metadata cache for a specific dataset or all datasets."""
+    if dataset:
+        await _metadata_state_manager.delete_metadata(dataset, version)
+        logger.info(f"Cleared metadata cache for dataset {dataset}")
+    else:
+        # This would require a more complex implementation to clear all keys
+        # For now, we'll just log that this feature isn't implemented
+        logger.warning("Clearing all metadata cache not implemented. Use clear_metadata_cache(dataset) instead.")
 
 def random_string(n=4):
     return "".join(random.sample([chr(x) for x in range(97, 97 + 26)], n))
@@ -757,18 +771,15 @@ class DataAPI:
 
     @backoff.on_exception(backoff.expo, (httpx.TimeoutException, httpx.HTTPStatusError), max_tries=3)
     async def get_dataset_metadata(self, dataset: str = "", version: str = "latest"):
-        """Get dataset metadata with caching to reduce API calls."""
-        cache_key = f"{dataset}_{version}"
-        current_time = datetime.now(tz=timezone.utc)
+        """Get dataset metadata with Redis caching to reduce API calls."""
         
-        # Check cache first
-        if cache_key in _dataset_metadata_cache:
-            cached_data, cache_time = _dataset_metadata_cache[cache_key]
-            if (current_time - cache_time).total_seconds() < _metadata_cache_ttl:
-                logger.debug(f"Using cached metadata for dataset {dataset}")
-                return cached_data
+        # Check Redis cache first
+        cached_data = await _metadata_state_manager.get_metadata(dataset, version)
+        if cached_data:
+            logger.debug(f"Using cached metadata for dataset {dataset}")
+            return DatasetResponseItem.parse_obj(cached_data)
         
-        # Fetch from API if not cached or expired
+        # Fetch from API if not cached
         api_keys = await self.get_api_keys()
         headers = {"x-api-key": api_keys[0].api_key}
 
@@ -783,11 +794,14 @@ class DataAPI:
                 data = response.json()
                 metadata = DatasetResponseItem.parse_obj(data.get("data"))
                 
-                # Cache the result
-                _dataset_metadata_cache[cache_key] = (metadata, current_time)
-                logger.debug(f"Cached metadata for dataset {dataset}")
+                # Cache the result in Redis with TTL
+                await _metadata_state_manager.set_metadata_with_ttl(dataset, version, metadata.dict(), GFW_METADATA_CACHE_TTL)
+                logger.debug(f"Cached metadata for dataset {dataset} in Redis")
                 
                 return metadata
+            else:
+                logger.error(f"Failed to get metadata for dataset {dataset}. Status: {response.status_code}")
+                response.raise_for_status()
 
     async def optimize_date_range_for_dataset(
         self, 
