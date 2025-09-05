@@ -420,7 +420,15 @@ class DataAPI:
 
         # If we already have API keys, filter to only those that are still valid.
         if not self._api_keys:
-            self._api_keys = await self.get_api_keys()
+            try:
+                self._api_keys = await self.get_api_keys()
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 404:
+                    # No API keys exist, we'll create one below
+                    self._api_keys = []
+                else:
+                    # Re-raise other HTTP errors
+                    raise
 
         # Filter to only those that are still valid.
         if good_api_keys := [
