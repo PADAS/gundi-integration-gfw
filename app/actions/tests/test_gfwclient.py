@@ -4,16 +4,28 @@ import asyncio
 import pytest
 import httpx
 import respx
+from unittest.mock import patch
 
 from app.actions.gfwclient import DataAPI, DataAPIKeysResponse
+
+@pytest.fixture
+def fast_backoff():
+    """Fixture to speed up backoff delays during testing."""
+    # Mock asyncio.sleep to return immediately
+    async def mock_sleep(delay):
+        # Return immediately without delay
+        return
+    
+    with patch('asyncio.sleep', side_effect=mock_sleep):
+        yield
 
 @pytest.fixture
 def f_api_keys_response():
     return {
         "data": [
             {
-                "created_on": "2021-09-14T08:00:00.000Z",
-                "updated_on": "2021-09-14T08:00:00.000Z",
+                "created_on": "2025-09-05T23:15:00.000Z",  # After magic_value_ignore_apikeys_before
+                "updated_on": "2025-09-05T23:15:00.000Z",
                 "user_id": "er_user",
                 "expires_on": (datetime.now(tz=timezone.utc) + timedelta(days=10)).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
                 "api_key": "1234567890",
@@ -40,8 +52,8 @@ def f_auth_token_response():
 def f_create_api_key_response():
     return {
         "data": {
-            "created_on": "2021-09-14T08:00:00.000Z",
-            "updated_on": "2021-09-14T08:00:00.000Z",
+            "created_on": "2025-09-05T23:15:00.000Z",  # After magic_value_ignore_apikeys_before
+            "updated_on": "2025-09-05T23:15:00.000Z",
             "user_id": "er_user",
             "expires_on": (datetime.now(tz=timezone.utc) + timedelta(days=10)).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
             "api_key": "1234567890",
@@ -57,8 +69,8 @@ def f_api_keys_with_one_expired_response():
     return {
         "data": [
             {
-                "created_on": "2021-09-14T08:00:00.000Z",
-                "updated_on": "2021-09-14T08:00:00.000Z",
+                "created_on": "2025-09-05T23:02:00.000Z",
+                "updated_on": "2025-09-05T23:01:00.000Z",
                 "user_id": "er_user",
                 "expires_on": (datetime.now(tz=timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
                 "api_key": "1234567890",
@@ -197,7 +209,8 @@ async def test_fetch_integrated_alerts_backs_off_3_times_then_gives_up(
         caplog,
         f_api_keys_response,
         f_auth_token_response,
-        f_create_api_key_response
+        f_create_api_key_response,
+        fast_backoff
 ):
     respx.post(f"{DataAPI.DATA_API_URL}/auth/token").respond(status_code=200, json=f_auth_token_response)
 
@@ -241,7 +254,8 @@ async def test_fetch_integrated_alerts_backs_off_2_times_then_succeed(
         f_api_keys_response,
         f_auth_token_response,
         f_create_api_key_response,
-        f_get_alerts_response
+        f_get_alerts_response,
+        fast_backoff
 ):
     respx.post(f"{DataAPI.DATA_API_URL}/auth/token").respond(status_code=200, json=f_auth_token_response)
 

@@ -430,16 +430,35 @@ class DataAPI:
                     # Re-raise other HTTP errors
                     raise
 
+        magic_value_ignore_apikeys_before = datetime(2025, 9, 5, 23, 11, 8, tzinfo=timezone.utc) 
+
         # Filter to only those that are still valid.
         if good_api_keys := [
-                            api_key for api_key in self._api_keys if api_key.expires_on > datetime.now(tz=timezone.utc)
+                            api_key for api_key in self._api_keys if api_key.expires_on > datetime.now(tz=timezone.utc) 
+                                and api_key.created_on > magic_value_ignore_apikeys_before
                         ]:
-            return good_api_keys[0]
+            return good_api_keys[-1]
 
         data = await self.create_api_key()
         self._api_keys.append(data)
         return data
 
+    async def delete_api_key(self, api_key: str):
+        headers = await self.get_auth_header()
+        async with httpx.AsyncClient(timeout=DEFAULT_REQUEST_TIMEOUT) as client:
+            response = await client.delete(
+                f"{self.DATA_API_URL}/auth/apikey/{api_key}", headers=headers, follow_redirects=True
+            )
+            response.raise_for_status()
+
+    async def validate_api_key(self, api_key: str):
+        headers = await self.get_auth_header()
+        async with httpx.AsyncClient(timeout=DEFAULT_REQUEST_TIMEOUT) as client:
+            response = await client.get(
+                f"{self.DATA_API_URL}/auth/apikey/{api_key}/validate", headers=headers, follow_redirects=True
+            )
+            response.raise_for_status()
+            return response.json()
 
     @backoff.on_exception(backoff.constant, httpx.HTTPError, max_tries=3, interval=10)
     async def get_aoi(self, aoi_id: str):
