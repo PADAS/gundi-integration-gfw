@@ -374,8 +374,8 @@ class DataAPI:
             token = await anext(self._auth_gen)
         return {"authorization": f"{token.token_type} {token.access_token}"}
 
-    @backoff.on_exception(backoff.expo, (httpx.TimeoutException, httpx.HTTPStatusError), max_tries=3)
-    async def create_api_key(self):
+    @backoff.on_exception(backoff.expo, (httpx.TimeoutException, httpx.HTTPStatusError), factor=5, max_tries=3)
+    async def create_api_key(self) -> DataAPIKey:
 
         headers = await self.get_auth_header()
 
@@ -395,42 +395,70 @@ class DataAPI:
             )
 
             if httpx.codes.is_success(response.status_code):
-                return DataAPIKeyResponse.parse_obj(response.json())
+                return DataAPIKeyResponse.parse_obj(response.json()).data
+            
+            response.raise_for_status()
 
-    @backoff.on_exception(backoff.expo, (httpx.TimeoutException, httpx.HTTPStatusError), max_tries=3)
+    @backoff.on_exception(backoff.expo, (httpx.TimeoutException, httpx.HTTPStatusError), factor=5, max_tries=3)
     async def get_api_keys(self) -> List[DataAPIKey]:
 
-        # If we already have API keys, filter to only those that are still valid.
-        if self._api_keys:
-            good_api_keys = [
-                                api_key for api_key in self._api_keys if api_key.expires_on > datetime.now(tz=timezone.utc)
-                            ]
-            if good_api_keys:
-                return good_api_keys
-            
-        # Otherwise, go back, get them from the API and cache them.
         headers = await self.get_auth_header()
 
-        for _ in range(0, 2):
-            async with httpx.AsyncClient(timeout=DEFAULT_REQUEST_TIMEOUT) as client:
-                response = await client.get(
-                    f"{self.DATA_API_URL}/auth/apikeys", headers=headers,
-                    follow_redirects=True
-                )
+        async with httpx.AsyncClient(timeout=DEFAULT_REQUEST_TIMEOUT) as client:
+            response = await client.get(
+                f"{self.DATA_API_URL}/auth/apikeys", headers=headers,
+                follow_redirects=True
+            )
 
-                if httpx.codes.is_success(response.status_code):
-                    data = DataAPIKeysResponse.parse_obj(response.json())
+            response.raise_for_status()
 
-                    if good_api_keys := list([
-                        api_key for api_key in data.data if api_key.expires_on > datetime.now(tz=timezone.utc)
-                    ]):
-                        self._api_keys = good_api_keys
-                        break
+            if httpx.codes.is_success(response.status_code):
+                response = DataAPIKeysResponse.parse_obj(response.json())
+                return response.data
 
-                # Assume we need to create an API key.
-                data = await self.create_api_key()
+    async def get_a_valid_api_key(self) -> DataAPIKey:
 
-        return self._api_keys
+        # If we already have API keys, filter to only those that are still valid.
+        if not self._api_keys:
+            try:
+                self._api_keys = await self.get_api_keys()
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 404:
+                    # No API keys exist, we'll create one below
+                    self._api_keys = []
+                else:
+                    # Re-raise other HTTP errors
+                    raise
+
+        magic_value_ignore_apikeys_before = datetime(2025, 9, 5, 23, 11, 8, tzinfo=timezone.utc) 
+
+        # Filter to only those that are still valid.
+        if good_api_keys := [
+                            api_key for api_key in self._api_keys if api_key.expires_on > datetime.now(tz=timezone.utc) 
+                                and api_key.created_on > magic_value_ignore_apikeys_before
+                        ]:
+            return good_api_keys[-1]
+
+        data = await self.create_api_key()
+        self._api_keys.append(data)
+        return data
+
+    async def delete_api_key(self, api_key: str):
+        headers = await self.get_auth_header()
+        async with httpx.AsyncClient(timeout=DEFAULT_REQUEST_TIMEOUT) as client:
+            response = await client.delete(
+                f"{self.DATA_API_URL}/auth/apikey/{api_key}", headers=headers, follow_redirects=True
+            )
+            response.raise_for_status()
+
+    async def validate_api_key(self, api_key: str):
+        headers = await self.get_auth_header()
+        async with httpx.AsyncClient(timeout=DEFAULT_REQUEST_TIMEOUT) as client:
+            response = await client.get(
+                f"{self.DATA_API_URL}/auth/apikey/{api_key}/validate", headers=headers, follow_redirects=True
+            )
+            response.raise_for_status()
+            return response.json()
 
     @backoff.on_exception(backoff.constant, httpx.HTTPError, max_tries=3, interval=10)
     async def get_aoi(self, aoi_id: str):
@@ -514,8 +542,8 @@ class DataAPI:
         geostore_id: str
     ):
 
-        api_keys = await self.get_api_keys()
-        headers = {"x-api-key": api_keys[0].api_key}
+        api_key = await self.get_a_valid_api_key()
+        headers = {"x-api-key": api_key.api_key}
 
         fields = {"latitude", "longitude"} | fields or set()
 
@@ -614,11 +642,11 @@ class DataAPI:
         return [NasaViirsFireAlert.parse_obj(alert) for alert in alerts] if alerts else []
         
 
-    @backoff.on_exception(backoff.expo, (httpx.TimeoutException, httpx.HTTPStatusError), max_tries=3)
+    @backoff.on_exception(backoff.expo, (httpx.TimeoutException, httpx.HTTPStatusError), max_tries=3, factor=3)
     async def get_dataset_metadata(self, dataset: str = "", version: str = "latest"):
 
-        api_keys = await self.get_api_keys()
-        headers = {"x-api-key": api_keys[0].api_key}
+        api_key = await self.get_a_valid_api_key()
+        headers = {"x-api-key": api_key.api_key}
 
         async with httpx.AsyncClient(timeout=DEFAULT_REQUEST_TIMEOUT) as client:
             response = await client.get(
