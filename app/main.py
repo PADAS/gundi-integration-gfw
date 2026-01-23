@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.services.action_runner import execute_action, _portal
 from app.services.self_registration import register_integration_in_gundi
+from app.actions.handlers import state_manager
 
 
 # For running behind a proxy, we'll want to configure the root path for OpenAPI browser.
@@ -26,7 +27,8 @@ async def lifespan(app: FastAPI):
         await register_integration_in_gundi(gundi_client=_portal)
         # ToDo: set env var to false in GCP after registration
     yield
-    # Shotdown Hook
+    # Shutdown Hook
+    await state_manager.close()
     await _portal.close()
 
 

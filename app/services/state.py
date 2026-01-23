@@ -188,6 +188,15 @@ class IntegrationStateManager:
                 pipeline.srem(set_key, job_id)
                 await pipeline.execute()
 
+    async def close(self):
+        """
+        Close the Redis connection gracefully.
+        
+        Should be called during application shutdown to prevent
+        'Event loop is closed' errors.
+        """
+        await self.db_client.aclose()
+
     def __str__(self):
         return f"IntegrationStateManager(host={self.db_client.host}, port={self.db_client.port}, db={self.db_client.db})"
 
