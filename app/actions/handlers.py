@@ -115,14 +115,36 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
 
     auth_config = get_auth_config(integration)
 
-    # Get AOI data first.
+    # Get AOI data from API, with fallback to cached data
     dataapi = DataAPI(username=auth_config.email, password=auth_config.password.get_secret_value())
+    aoi_data = None
 
-    # Get AOI and Geostore data.
-    aoi_id = await dataapi.aoi_from_url(action_config.gfw_share_link_url)
-    aoi_data = await dataapi.get_aoi(aoi_id=aoi_id)
+    # Prefer cached AOI data, fall back to API if not available
+    cached_data = await state_manager.get_aoi_data(str(integration.id))
+    if cached_data:
+        aoi_data = AOIData.parse_obj(cached_data)
+        logger.info(f"Using cached AOI data for integration {integration.id}")
+    else:
+        try:
+            aoi_id = await dataapi.aoi_from_url(action_config.gfw_share_link_url)
+            aoi_data = await dataapi.get_aoi(aoi_id=aoi_id)
+            # Cache the AOI data for future use
+            await state_manager.set_aoi_data(str(integration.id), aoi_data.dict())
+            logger.info(f"Fetched and cached AOI data for integration {integration.id}")
+        except Exception as e:
+            msg = f"Failed to fetch AOI data for {action_config.gfw_share_link_url} and no cached data is available: {e}"
+            logger.error(msg, extra={"needs_attention": True, "integration_id": str(integration.id)})
+            await log_action_activity(
+                integration_id=integration.id,
+                action_id=action_pull_events.__name__.replace("action_", ""),
+                level=LogLevel.ERROR,
+                title=msg,
+                data={"error": str(e)}
+            )
+            result["message"] = msg
+            return result
 
-    # Some AOIs do not have an associated Geostore so we short-circuit here a report in the logs.
+    # Some AOIs do not have an associated Geostore so we short-circuit here and report in the logs.
     if not aoi_data.attributes.geostore:
         msg = f"No Geostore associated with AOI {aoi_data.id}."
         logger.error(
@@ -143,11 +165,6 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
         )
         result["message"] = msg
         return result
-
-    # Store the geostore ID from the AOI for use by feed actions
-    await state_manager.clear_geostore_ids(aoi_data.id)
-    await state_manager.add_geostore_id(aoi_data.id, aoi_data.attributes.geostore)
-    await state_manager.set_geostores_id_ttl(aoi_data.id, 86400*7)
 
     # Trigger feed-specific sub-actions independently (each with its own quiet period)
     triggered_actions = []

@@ -2,6 +2,7 @@ import json
 import stamina
 import httpx
 import redis.asyncio as redis
+from datetime import timedelta
 from app import settings
 
 
@@ -35,11 +36,16 @@ class IntegrationStateManager:
                     f"integration_state.{integration_id}.{action_id}.{source_id}"
                 )
 
-    async def set_quiet_period(self, integration_id: str, action_id:str, quiet_period: int):
+    async def set_quiet_period(self, integration_id: str, action_id:str, quiet_period: int | timedelta):
         for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
             with attempt:
-                await self.db_client.setex(
-                    f"integration_state.{integration_id}.{action_id}.quiet_period", quiet_period, 1)
+                if quiet_period: # handle both int and timedelta
+                    await self.db_client.setex(
+                        f"integration_state.{integration_id}.{action_id}.quiet_period", quiet_period, 1)
+                else:
+                    await self.db_client.delete(
+                        f"integration_state.{integration_id}.{action_id}.quiet_period"
+                    )
 
     async def is_quiet_period(self, integration_id: str, action_id: str):
         for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
@@ -48,44 +54,37 @@ class IntegrationStateManager:
                     f"integration_state.{integration_id}.{action_id}.quiet_period",
                 )
                 return val
-            
-    async def add_geostore_id(self, aoi_id: str, geostore_id: str): 
+
+    # Default TTL for cached AOI data: 7 days
+    DEFAULT_AOI_DATA_TTL_SECONDS = 86400 * 7
+
+    async def set_aoi_data(self, integration_id: str, aoi_data: dict, ttl_seconds: int = None):
+        """
+        Cache AOI data for an integration.
+        
+        This provides resilience if the GFW API is temporarily unavailable.
+        """
+        ttl = ttl_seconds or self.DEFAULT_AOI_DATA_TTL_SECONDS
         for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
             with attempt:
-                await self.db_client.sadd(
-                    f"integration_state.{aoi_id}.geostore_ids",
-                    geostore_id
+                await self.db_client.setex(
+                    f"integration_state.{integration_id}.aoi_data",
+                    ttl,
+                    json.dumps(aoi_data, default=str)
                 )
 
-    async def get_geostore_ids(self, aoi_id: str):
+    async def get_aoi_data(self, integration_id: str) -> dict | None:
+        """
+        Retrieve cached AOI data for an integration.
+        
+        Returns None if no cached data exists.
+        """
         for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
             with attempt:
-                return await self.db_client.smembers(
-                    f"integration_state.{aoi_id}.geostore_ids"
-                )
-            
-    async def set_geostore_ids_ttl(self, aoi_id: str, ttl: int):
-        for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
-            with attempt:
-                await self.db_client.expire(
-                    f"integration_state.{aoi_id}.geostore_ids_ttl",
-                    ttl
-                )
-
-    async def get_geostore_ids_ttl(self, aoi_id: str):
-        for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
-            with attempt:
-                return await self.db_client.get(
-                    f"integration_state.{aoi_id}.geostore_ids_ttl"
-                )
-            
-    async def clear_geostore_ids(self, aoi_id: str):
-        for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
-            with attempt:
-                await self.db_client.delete(
-                    f"integration_state.{aoi_id}.geostore_ids", 
-                    f"integration_state.{aoi_id}.geostore_ids_ttl"
-                )
+                data = await self.db_client.get(f"integration_state.{integration_id}.aoi_data")
+        if data:
+            return json.loads(data)
+        return None
 
     # Default TTL for pending jobs: 24 hours
     # Jobs should complete well within this time, and expired jobs will be cleaned up automatically
