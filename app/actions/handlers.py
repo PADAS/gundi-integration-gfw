@@ -4,11 +4,9 @@ import logging
 import random
 import app.settings
 
-from app.actions import utils
-from app.actions.gfwclient import DataAPI, Geostore, DatasetStatus, \
+from app.actions.gfwclient import DataAPI, DatasetStatus, \
     AOIData, DATASET_GFW_INTEGRATED_ALERTS, DATASET_NASA_VIIRS_FIRE_ALERTS, DataAPIAuthException, \
     JobResponse, IntegratedAlert, DownloadLinkExpiredException
-from shapely.geometry import GeometryCollection, shape, mapping
 from datetime import timezone, timedelta, datetime
 
 from app.actions.configurations import (
@@ -146,51 +144,10 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
         result["message"] = msg
         return result
 
-    if action_config.partition_geometry:
-        geostore_ids = await state_manager.get_geostore_ids(aoi_data.id)
-        if not geostore_ids:
-            # Partition mode: split the geometry into smaller fragments for large AOIs
-            geostore:Geostore = await dataapi.get_geostore(geostore_id=aoi_data.attributes.geostore)
-
-            geometry_collection = GeometryCollection(
-                [
-                    shape(feature["geometry"]).buffer(0)
-                    for feature in geostore.attributes.geojson["features"]
-                ]
-            )
-
-            try:
-                for partition in utils.generate_geometry_fragments(geometry_collection=geometry_collection, 
-                                                               interval=action_config.partition_interval_size_in_degrees):
-                    try:
-                        geostore = await dataapi.create_geostore(geometry=mapping(partition))
-                    except AttributeError:
-                        msg = f"Error while creating Geostore for Geometry Collection (invalid partition)."
-                        logger.exception(msg)
-                        await log_action_activity(
-                            integration_id=integration.id,
-                            action_id=action_pull_events.__name__.replace("action_", ""),
-                            level=LogLevel.WARNING,
-                            title=msg,
-                            data={"aoi_data": aoi_data.dict(), "geometry_collection": geometry_collection.wkt}
-                        )
-                    else:
-                        await state_manager.add_geostore_id(aoi_data.id, geostore.gfw_geostore_id)
-            except ValueError:
-                msg = f"Error while generating geometry fragments for Geometry Collection."
-                logger.exception(msg)
-                await log_action_activity(
-                    integration_id=integration.id,
-                    action_id=action_pull_events.__name__.replace("action_", ""),
-                    level=LogLevel.WARNING,
-                    title=msg,
-                    data={"aoi_data": aoi_data.dict(), "geometry_collection": geometry_collection.wkt}
-                )
-        else:
-            # Default mode: use the original geostore ID from the AOI
-            await state_manager.add_geostore_id(aoi_data.id, aoi_data.attributes.geostore)
-
-        await state_manager.set_geostores_id_ttl(aoi_data.id, 86400*7)
+    # Store the geostore ID from the AOI for use by feed actions
+    await state_manager.clear_geostore_ids(aoi_data.id)
+    await state_manager.add_geostore_id(aoi_data.id, aoi_data.attributes.geostore)
+    await state_manager.set_geostores_id_ttl(aoi_data.id, 86400*7)
 
     # Trigger feed-specific sub-actions independently (each with its own quiet period)
     triggered_actions = []
@@ -267,11 +224,8 @@ async def action_get_nasa_viirs_fire_alerts(integration: Integration, action_con
     fire_dataset_metadata = None
     fire_alerts_actions_triggered = 0
 
-    if action_config.pull_events_config.partition_geometry:
-        geostore_ids = await state_manager.get_geostore_ids(action_config.aoi_data.id)
-        geostore_ids = [gid.decode('utf8') if isinstance(gid, bytes) else gid for gid in geostore_ids]
-    else:
-        geostore_ids = [action_config.aoi_data.attributes.geostore]
+    # Use the geostore ID from AOI data
+    geostore_ids = [action_config.aoi_data.attributes.geostore]
 
     # Date ranges are in whole days, so we round to next midnight.
     end_date = (datetime.now(tz=timezone.utc) + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -497,11 +451,8 @@ async def action_get_gfw_integrated_alerts(integration: Integration, action_conf
             logger.exception(f"Error polling job {job_id}: {e}")
 
     # Step 2: Check if dataset has been updated and create new batch query
-    if action_config.pull_events_config.partition_geometry:
-        geostore_ids = await state_manager.get_geostore_ids(action_config.aoi_data.id)
-        geostore_ids = [gid.decode('utf8') if isinstance(gid, bytes) else gid for gid in geostore_ids]
-    else:
-        geostore_ids = [action_config.aoi_data.attributes.geostore]
+    # Use the geostore ID from AOI data
+    geostore_ids = [action_config.aoi_data.attributes.geostore]
 
     # Date ranges are in whole days, so we round to next midnight.
     end_date = (datetime.now(tz=timezone.utc) + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
