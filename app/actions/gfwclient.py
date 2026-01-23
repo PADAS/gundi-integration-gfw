@@ -178,16 +178,6 @@ class AOIData(pydantic.BaseModel):
     attributes: AOIAttributes
 
 
-# class Data(BaseModel):
-#     job_id: str
-#     job_link: Any
-#     status: str
-#     message: Any
-#     download_link: Any
-#     failed_geometries_link: Any
-#     progress: str
-
-
 class JobResponse(pydantic.BaseModel):
     class Data(pydantic.BaseModel):
         job_id: str
@@ -968,13 +958,3 @@ class DataAPI:
                     return alerts
                 
                 return []
-
-    async def test_batch(self, *, dataset:str, version:str="latest", query: str, geostore_ids: List[str]):
-        async with httpx.AsyncClient() as client:
-            response = await client.post(f"{self.DATA_API_URL}/dataset/{dataset}/{version}/query/batch", json={
-                "query": query,
-                "geostore_ids": geostore_ids
-            })
-            return response.json()    
-
-        
