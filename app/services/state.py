@@ -116,14 +116,18 @@ class IntegrationStateManager:
         
         for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
             with attempt:
+                # Use a transactional pipeline so both operations succeed or fail together
+                pipe = self.db_client.pipeline(transaction=True)
                 # Store job data with TTL
-                await self.db_client.setex(
+                pipe.setex(
                     job_key,
                     ttl,
                     json.dumps(job_data, default=str)
                 )
                 # Add job ID to tracking set
-                await self.db_client.sadd(set_key, job_id)
+                pipe.sadd(set_key, job_id)
+                # Execute both commands atomically
+                await pipe.execute()
 
     async def get_pending_jobs(self, integration_id: str, action_id: str) -> list:
         """
