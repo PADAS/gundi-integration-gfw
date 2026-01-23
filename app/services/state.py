@@ -179,8 +179,10 @@ class IntegrationStateManager:
         
         for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
             with attempt:
-                await self.db_client.delete(job_key)
-                await self.db_client.srem(set_key, job_id)
+                pipeline = self.db_client.pipeline(transaction=True)
+                pipeline.delete(job_key)
+                pipeline.srem(set_key, job_id)
+                await pipeline.execute()
 
     def __str__(self):
         return f"IntegrationStateManager(host={self.db_client.host}, port={self.db_client.port}, db={self.db_client.db})"
