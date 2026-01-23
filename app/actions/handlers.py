@@ -6,7 +6,8 @@ import app.settings
 
 from app.actions import utils
 from app.actions.gfwclient import DataAPI, Geostore, DatasetStatus, \
-    AOIData, DATASET_GFW_INTEGRATED_ALERTS, DATASET_NASA_VIIRS_FIRE_ALERTS, DataAPIAuthException
+    AOIData, DATASET_GFW_INTEGRATED_ALERTS, DATASET_NASA_VIIRS_FIRE_ALERTS, DataAPIAuthException, \
+    JobResponse, IntegratedAlert, DownloadLinkExpiredException
 from shapely.geometry import GeometryCollection, shape, mapping
 from datetime import timezone, timedelta, datetime
 
@@ -14,12 +15,14 @@ from app.actions.configurations import (
     AuthenticateConfig,
     PullEventsConfig,
     get_auth_config,
-    GetDatasetAndGeostoresConfig,
+    GetFireAlertsDatasetAndGeostoresConfig,
+    GetIntegratedAlertsDatasetAndGeostoresConfig,
     GetNasaVIIRSFireAlertsForGeostoreID,
     GetIntegratedAlertsForGeostoreID
 )
 from app.services.action_scheduler import trigger_action
 from app.services.activity_logger import activity_logger, log_action_activity
+from app.services.action_scheduler import crontab_schedule
 from app.services.gundi import send_events_to_gundi
 from app.services.state import IntegrationStateManager
 
@@ -28,8 +31,6 @@ from pydantic import ValidationError
 
 GFW_INTEGRATED_ALERTS = "gfwgladalert"
 GFW_FIRE_ALERT = "gfwfirealert"
-
-MAX_DAYS_PER_QUERY = 2
 
 logger = logging.getLogger(__name__)
 state_manager = IntegrationStateManager()
@@ -108,21 +109,18 @@ async def action_auth(integration, action_config: AuthenticateConfig):
 
 
 @activity_logger()
+@crontab_schedule("*/10 * * * *")
 async def action_pull_events(integration: Integration, action_config: PullEventsConfig):
     result = {}
 
-    if not action_config.force_fetch and await state_manager.is_quiet_period(str(integration.id), "pull_events"):
-        result["message"] = "Quiet period is active."
-        return result
-
-
-    logger.info(f"Executing 'pull_events' action with integration {integration} and action_config {action_config}...")
+    logger.info(f"Executing 'pull_events' action with integration {integration} and action_config {action_config}")
 
     auth_config = get_auth_config(integration)
 
     # Get AOI data first.
     dataapi = DataAPI(username=auth_config.email, password=auth_config.password.get_secret_value())
 
+    # Get AOI and Geostore data.
     aoi_id = await dataapi.aoi_from_url(action_config.gfw_share_link_url)
     aoi_data = await dataapi.get_aoi(aoi_id=aoi_id)
 
@@ -140,7 +138,7 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
         )
         await log_action_activity(
             integration_id=integration.id,
-            action_id="pull_events",
+            action_id=action_pull_events.__name__.replace("action_", ""),
             level=LogLevel.ERROR,
             title=msg,
             data={"aoi_data": aoi_data.dict()}
@@ -148,71 +146,487 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
         result["message"] = msg
         return result
 
-    # Get AOI and Geostore data.
-    geostore_ids = await state_manager.get_geostore_ids(aoi_data.id)
+    if action_config.partition_geometry:
+        geostore_ids = await state_manager.get_geostore_ids(aoi_data.id)
+        if not geostore_ids:
+            # Partition mode: split the geometry into smaller fragments for large AOIs
+            geostore:Geostore = await dataapi.get_geostore(geostore_id=aoi_data.attributes.geostore)
 
-    if not geostore_ids:
-        geostore:Geostore = await dataapi.get_geostore(geostore_id=aoi_data.attributes.geostore)
-
-        geometry_collection = GeometryCollection(
-            [
-                shape(feature["geometry"]).buffer(0)
-                for feature in geostore.attributes.geojson["features"]
-            ]
-        )
-
-        try:
-            for partition in utils.generate_geometry_fragments(geometry_collection=geometry_collection, 
-                                                           interval=action_config.partition_interval_size_in_degrees):
-                try:
-                    geostore = await dataapi.create_geostore(geometry=mapping(partition))
-                except AttributeError:
-                    msg = f"Error while creating Geostore for Geometry Collection (invalid partition)."
-                    logger.exception(msg)
-                    await log_action_activity(
-                        integration_id=integration.id,
-                        action_id="pull_events",
-                        level=LogLevel.WARNING,
-                        title=msg,
-                        data={"aoi_data": aoi_data.dict(), "geometry_collection": geometry_collection.wkt}
-                    )
-                else:
-                    await state_manager.add_geostore_id(aoi_data.id, geostore.gfw_geostore_id)
-        except ValueError:
-            msg = f"Error while generating geometry fragments for Geometry Collection."
-            logger.exception(msg)
-            await log_action_activity(
-                integration_id=integration.id,
-                action_id="pull_events",
-                level=LogLevel.WARNING,
-                title=msg,
-                data={"aoi_data": aoi_data.dict(), "geometry_collection": geometry_collection.wkt}
+            geometry_collection = GeometryCollection(
+                [
+                    shape(feature["geometry"]).buffer(0)
+                    for feature in geostore.attributes.geojson["features"]
+                ]
             )
+
+            try:
+                for partition in utils.generate_geometry_fragments(geometry_collection=geometry_collection, 
+                                                               interval=action_config.partition_interval_size_in_degrees):
+                    try:
+                        geostore = await dataapi.create_geostore(geometry=mapping(partition))
+                    except AttributeError:
+                        msg = f"Error while creating Geostore for Geometry Collection (invalid partition)."
+                        logger.exception(msg)
+                        await log_action_activity(
+                            integration_id=integration.id,
+                            action_id=action_pull_events.__name__.replace("action_", ""),
+                            level=LogLevel.WARNING,
+                            title=msg,
+                            data={"aoi_data": aoi_data.dict(), "geometry_collection": geometry_collection.wkt}
+                        )
+                    else:
+                        await state_manager.add_geostore_id(aoi_data.id, geostore.gfw_geostore_id)
+            except ValueError:
+                msg = f"Error while generating geometry fragments for Geometry Collection."
+                logger.exception(msg)
+                await log_action_activity(
+                    integration_id=integration.id,
+                    action_id=action_pull_events.__name__.replace("action_", ""),
+                    level=LogLevel.WARNING,
+                    title=msg,
+                    data={"aoi_data": aoi_data.dict(), "geometry_collection": geometry_collection.wkt}
+                )
+        else:
+            # Default mode: use the original geostore ID from the AOI
+            await state_manager.add_geostore_id(aoi_data.id, aoi_data.attributes.geostore)
 
         await state_manager.set_geostores_id_ttl(aoi_data.id, 86400*7)
 
-    # Trigger "get_dataset_and_geostores" sub-action
-    config = GetDatasetAndGeostoresConfig(
-        integration_id=str(integration.id),
-        pull_events_config=action_config,
-        aoi_data=aoi_data
-    )
-    await trigger_action(integration.id, "get_dataset_and_geostores", config=config)
+    # Trigger feed-specific sub-actions independently (each with its own quiet period)
+    triggered_actions = []
+    skipped_actions = []
+    
+    # Fire alerts - check its own quiet period
+    if action_config.include_fire_alerts:
+        if not action_config.force_fetch and await state_manager.is_quiet_period(str(integration.id), "fire_alerts"):
+            logger.info("Fire alerts quiet period active, skipping")
+            skipped_actions.append("fire_alerts")
+        else:
+            fire_config = GetFireAlertsDatasetAndGeostoresConfig(
+                integration_id=str(integration.id),
+                pull_events_config=action_config,
+                aoi_data=aoi_data
+            )
+            await trigger_action(integration.id, action_get_nasa_viirs_fire_alerts.__name__.replace("action_", ""), config=fire_config)
+            triggered_actions.append("fire_alerts")
+    
+    # Integrated alerts - check its own quiet period (but always run if pending jobs exist)
+    if action_config.include_integrated_alerts:
+        # Check if there are pending jobs that need polling (download links expire in 15 min)
+        integrated_action_id = action_get_gfw_integrated_alerts.__name__.replace("action_", "")
+        has_pending_jobs = len(await state_manager.get_pending_jobs(str(integration.id), integrated_action_id)) > 0
+        
+        if has_pending_jobs:
+            # Always trigger if there are pending jobs - we need to poll them regardless of quiet period
+            logger.info("Integrated alerts has pending jobs, triggering to poll them")
+            integrated_config = GetIntegratedAlertsDatasetAndGeostoresConfig(
+                integration_id=str(integration.id),
+                pull_events_config=action_config,
+                aoi_data=aoi_data
+            )
+            await trigger_action(integration.id, integrated_action_id, config=integrated_config)
+            triggered_actions.append("integrated_alerts (polling jobs)")
+        elif not action_config.force_fetch and await state_manager.is_quiet_period(str(integration.id), "integrated_alerts"):
+            logger.info("Integrated alerts quiet period active, skipping")
+            skipped_actions.append("integrated_alerts")
+        else:
+            integrated_config = GetIntegratedAlertsDatasetAndGeostoresConfig(
+                integration_id=str(integration.id),
+                pull_events_config=action_config,
+                aoi_data=aoi_data
+            )
+            await trigger_action(integration.id, integrated_action_id, config=integrated_config)
+            triggered_actions.append("integrated_alerts")
 
-    quiet_minutes = random.randint(240, 720) # Todo: change to be more fair.
-    await state_manager.set_quiet_period(str(integration.id), "pull_events", timedelta(minutes=quiet_minutes))
-
-    result["message"] = "'get_dataset_and_geostores' action triggered successfully."
+    # Build result message
+    messages = []
+    if triggered_actions:
+        messages.append(f"Actions triggered: {', '.join(triggered_actions)}")
+    if skipped_actions:
+        messages.append(f"Skipped (quiet period): {', '.join(skipped_actions)}")
+    if not triggered_actions and not skipped_actions:
+        messages.append("No actions configured.")
+    
+    result["message"] = ". ".join(messages)
     return result
 
 
-def generate_date_pairs(lower_date, upper_date, interval=MAX_DAYS_PER_QUERY):
+def generate_date_pairs(lower_date, upper_date, interval=10):
     while upper_date > lower_date:
         yield max(lower_date, upper_date - timedelta(days=interval)), upper_date
         upper_date -= timedelta(days=interval)
 
 
-async def action_get_integrated_alerts_for_geostore_and_date_range(
+async def action_get_nasa_viirs_fire_alerts(integration: Integration, action_config: GetFireAlertsDatasetAndGeostoresConfig):
+    auth_config = get_auth_config(integration)
+    dataapi = DataAPI(
+        username=auth_config.email,
+        password=auth_config.password.get_secret_value()
+    )
+
+    fire_dataset_metadata = None
+    fire_alerts_actions_triggered = 0
+
+    if action_config.pull_events_config.partition_geometry:
+        geostore_ids = await state_manager.get_geostore_ids(action_config.aoi_data.id)
+        geostore_ids = [gid.decode('utf8') if isinstance(gid, bytes) else gid for gid in geostore_ids]
+    else:
+        geostore_ids = [action_config.aoi_data.attributes.geostore]
+
+    # Date ranges are in whole days, so we round to next midnight.
+    end_date = (datetime.now(tz=timezone.utc) + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    start_date = end_date - timedelta(days=action_config.pull_events_config.fire_lookback_days)
+
+    fire_dataset_metadata = await dataapi.get_dataset_metadata(DATASET_NASA_VIIRS_FIRE_ALERTS)
+    fire_dataset_status = await state_manager.get_state(
+        str(integration.id),
+        "pull_events",
+        DATASET_NASA_VIIRS_FIRE_ALERTS
+    )
+
+    if fire_dataset_status:
+        logger.info(f"Saved fire dataset status: {fire_dataset_status}")
+        try:
+            fire_dataset_status = DatasetStatus.parse_obj(fire_dataset_status)
+        except ValidationError:
+            logger.exception(
+                f"Invalid fire dataset status: {fire_dataset_status}. Setting it from metadata..."
+            )
+            fire_dataset_status = DatasetStatus(
+                dataset=fire_dataset_metadata.dataset,
+                version=fire_dataset_metadata.version,
+            )
+    else:
+        fire_dataset_status = DatasetStatus(
+            dataset=fire_dataset_metadata.dataset,
+            version=fire_dataset_metadata.version,
+        )
+
+    # If I've saved a status for this dataset, compare 'updated_on' timestamp to avoid redundant queries.
+    if not action_config.pull_events_config.force_fetch and fire_dataset_status.latest_updated_on >= fire_dataset_metadata.updated_on:
+        msg = f"No updates reported for dataset '{DATASET_NASA_VIIRS_FIRE_ALERTS}' so skipping nasa_viirs_fire_alerts queries"
+        logger.info(
+            msg,
+            extra={
+                "integration_id": str(integration.id),
+                "integration_login": auth_config.email,
+                "dataset_updated_on": fire_dataset_metadata.updated_on.isoformat(),
+            },
+        )
+        await log_action_activity(
+            integration_id=integration.id,
+            action_id=action_get_nasa_viirs_fire_alerts.__name__.replace("action_", ""),
+            level=LogLevel.INFO,
+            title=msg,
+            data={"dataset_updated_on": fire_dataset_metadata.updated_on.isoformat()}
+        )
+        fire_dataset_metadata = None
+
+    # Check if the dataset is valid to trigger sub-actions
+    if fire_dataset_metadata:
+        for geostore_id in geostore_ids:
+            for lower, upper in generate_date_pairs(start_date, end_date, interval=7):
+                # Trigger "get_nasa_viirs_fire_alerts" sub-action
+                config = GetNasaVIIRSFireAlertsForGeostoreID(
+                    integration_id=str(integration.id),
+                    geostore_id=geostore_id,
+                    date_range=(lower, upper),
+                    lowest_confidence=action_config.pull_events_config.fire_alerts_lowest_confidence,
+                    dataset=fire_dataset_metadata
+                )
+
+                await trigger_action(
+                    integration.id,
+                    action_get_nasa_viirs_fire_alerts_for_geostore_and_date_range.__name__.replace("action_", ""),
+                    config=config
+                )
+                fire_alerts_actions_triggered += 1
+
+        # Save status for fire dataset
+        fire_dataset_status = DatasetStatus(
+            dataset=fire_dataset_metadata.dataset,
+            version=fire_dataset_metadata.version,
+            latest_updated_on=fire_dataset_metadata.updated_on
+        )
+
+        await state_manager.set_state(
+            str(integration.id),
+            "pull_events",
+            fire_dataset_status.dict(),
+            source_id=DATASET_NASA_VIIRS_FIRE_ALERTS
+        )
+
+    # Set tiered quiet period based on outcome
+    if fire_alerts_actions_triggered > 0:
+        # Work was done - long quiet period to rate limit expensive queries
+        quiet_minutes = random.randint(120, 240)
+    else:
+        # No updates - short quiet period for frequent cheap metadata checks
+        quiet_minutes = random.randint(30, 60)
+
+    await state_manager.set_quiet_period(
+        str(integration.id), "fire_alerts", timedelta(minutes=quiet_minutes)
+    )
+
+    return {
+        "fire_alerts_actions_triggered": fire_alerts_actions_triggered,
+        "quiet_period_minutes": quiet_minutes
+    }
+
+
+async def action_get_gfw_integrated_alerts(integration: Integration, action_config: GetIntegratedAlertsDatasetAndGeostoresConfig):
+    auth_config = get_auth_config(integration)
+    dataapi = DataAPI(
+        username=auth_config.email,
+        password=auth_config.password.get_secret_value()
+    )
+
+    result = {
+        "jobs_polled": 0,
+        "jobs_completed": 0,
+        "jobs_pending": 0,
+        "jobs_failed": 0,
+        "batch_jobs_created": 0,
+        "total_alerts_processed": 0
+    }
+
+    # Derive action ID from function name
+    action_id = action_get_gfw_integrated_alerts.__name__.replace("action_", "")
+
+    # Step 1: Poll any pending jobs from previous runs
+    pending_jobs = await state_manager.get_pending_jobs(str(integration.id), action_id)
+    
+    for job_data in pending_jobs:
+        result["jobs_polled"] += 1
+        job_id = job_data.get("job_id")
+        job_link = job_data.get("job_link")
+        
+        try:
+            job_status = await dataapi.get_job_status(job_link)
+            
+            # Job is ready when status is success/partial_success AND download_link is available
+            if job_status.status in ("success", "partial_success") and job_status.download_link:
+                # Log warning for partial success
+                if job_status.status == "partial_success":
+                    msg = f"Batch job {job_id} completed with partial success"
+                    logger.warning(
+                        msg,
+                        extra={
+                            "integration_id": str(integration.id),
+                            "job_id": job_id,
+                            "failed_geometries_link": str(job_status.failed_geometries_link) if job_status.failed_geometries_link else None
+                        }
+                    )
+                    await log_action_activity(
+                        integration_id=integration.id,
+                        action_id=action_id,
+                        level=LogLevel.WARNING,
+                        title=msg,
+                        data={"job_id": job_id, "failed_geometries_link": str(job_status.failed_geometries_link) if job_status.failed_geometries_link else None}
+                    )
+                
+                # Download and process results
+                try:
+                    alerts_data = await dataapi.download_job_results(str(job_status.download_link))
+                    
+                    if alerts_data:
+                        # Parse and transform alerts
+                        integrated_alerts = [IntegratedAlert.parse_obj(alert) for alert in alerts_data]
+                        transformed_data = [transform_integrated_alert(alert) for alert in integrated_alerts]
+                        
+                        await handle_transformed_data(
+                            transformed_data,
+                            str(integration.id),
+                            action_id
+                        )
+                        result["total_alerts_processed"] += len(integrated_alerts)
+                        logger.info(f"Processed {len(integrated_alerts)} integrated alerts from job {job_id}")
+                    
+                    result["jobs_completed"] += 1
+                    await state_manager.remove_pending_job(str(integration.id), action_id, job_id)
+                    
+                except DownloadLinkExpiredException as e:
+                    msg = f"Batch job {job_id} download link expired"
+                    logger.error(
+                        msg,
+                        extra={
+                            "integration_id": str(integration.id),
+                            "job_id": job_id,
+                            "error": str(e)
+                        }
+                    )
+                    await log_action_activity(
+                        integration_id=integration.id,
+                        action_id=action_id,
+                        level=LogLevel.ERROR,
+                        title=msg,
+                        data={"job_id": job_id, "error": str(e)}
+                    )
+                    result["jobs_failed"] += 1
+                    await state_manager.remove_pending_job(str(integration.id), action_id, job_id)
+                
+            elif job_status.status == "failed":
+                msg = f"Batch job {job_id} failed"
+                logger.error(
+                    msg,
+                    extra={
+                        "integration_id": str(integration.id),
+                        "job_id": job_id,
+                        "message": job_status.message
+                    }
+                )
+                await log_action_activity(
+                    integration_id=integration.id,
+                    action_id=action_id,
+                    level=LogLevel.ERROR,
+                    title=msg,
+                    data={"job_id": job_id, "message": job_status.message}
+                )
+                result["jobs_failed"] += 1
+                await state_manager.remove_pending_job(str(integration.id), action_id, job_id)
+                
+            else:
+                # Job is still pending (status is "pending" OR status is success/partial_success but no download_link yet)
+                result["jobs_pending"] += 1
+                if job_status.status in ("success", "partial_success"):
+                    logger.info(f"Job {job_id} status is {job_status.status} but download_link not ready yet")
+                else:
+                    logger.info(f"Job {job_id} still pending with progress: {job_status.progress}")
+                
+        except Exception as e:
+            logger.exception(f"Error polling job {job_id}: {e}")
+
+    # Step 2: Check if dataset has been updated and create new batch query
+    if action_config.pull_events_config.partition_geometry:
+        geostore_ids = await state_manager.get_geostore_ids(action_config.aoi_data.id)
+        geostore_ids = [gid.decode('utf8') if isinstance(gid, bytes) else gid for gid in geostore_ids]
+    else:
+        geostore_ids = [action_config.aoi_data.attributes.geostore]
+
+    # Date ranges are in whole days, so we round to next midnight.
+    end_date = (datetime.now(tz=timezone.utc) + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    start_date = end_date - timedelta(days=action_config.pull_events_config.integrated_alerts_lookback_days)
+
+    integrated_dataset_metadata = await dataapi.get_dataset_metadata(DATASET_GFW_INTEGRATED_ALERTS)
+    integrated_dataset_status = await state_manager.get_state(
+        str(integration.id),
+        "pull_events",
+        DATASET_GFW_INTEGRATED_ALERTS
+    )
+
+    if integrated_dataset_status:
+        logger.info(f"Saved integrated dataset status: {integrated_dataset_status}")
+        try:
+            integrated_dataset_status = DatasetStatus.parse_obj(integrated_dataset_status)
+        except ValidationError:
+            logger.exception(
+                f"Invalid integrated dataset status: {integrated_dataset_status}. Setting it from metadata..."
+            )
+            integrated_dataset_status = DatasetStatus(
+                dataset=integrated_dataset_metadata.dataset,
+                version=integrated_dataset_metadata.version,
+            )
+    else:
+        integrated_dataset_status = DatasetStatus(
+            dataset=integrated_dataset_metadata.dataset,
+            version=integrated_dataset_metadata.version,
+        )
+
+    # Check if dataset has been updated
+    dataset_updated = action_config.pull_events_config.force_fetch or integrated_dataset_status.latest_updated_on < integrated_dataset_metadata.updated_on
+
+    if not dataset_updated:
+        msg = f"No updates reported for dataset '{DATASET_GFW_INTEGRATED_ALERTS}' so skipping new batch query"
+        logger.info(
+            msg,
+            extra={
+                "integration_id": str(integration.id),
+                "integration_login": auth_config.email,
+                "dataset_updated_on": integrated_dataset_metadata.updated_on.isoformat(),
+            },
+        )
+        await log_action_activity(
+            integration_id=integration.id,
+            action_id=action_id,
+            level=LogLevel.INFO,
+            title=msg,
+            data={"dataset_updated_on": integrated_dataset_metadata.updated_on.isoformat()}
+        )
+    else:
+        # Create batch query for the full lookback period
+        for geostore_id in geostore_ids:
+            try:
+                async with sema:
+                    batch_result = await dataapi.query_batch_gfw_integrated_alerts(
+                        geostore_id=geostore_id,
+                        date_range=(start_date, end_date),
+                        lowest_confidence=action_config.pull_events_config.integrated_alerts_lowest_confidence,
+                        semaphore=sema
+                    )
+                
+                if batch_result:
+                    job_response = JobResponse.parse_obj(batch_result)
+                    
+                    # Store job in pending jobs cache
+                    job_data = {
+                        "job_id": job_response.data.job_id,
+                        "job_link": str(job_response.data.job_link),
+                        "geostore_id": geostore_id,
+                        "date_range_start": start_date.isoformat(),
+                        "date_range_end": end_date.isoformat(),
+                        "created_at": datetime.now(tz=timezone.utc).isoformat()
+                    }
+                    await state_manager.add_pending_job(str(integration.id), action_id, job_data)
+                    result["batch_jobs_created"] += 1
+                    
+                    logger.info(
+                        f"Created batch job {job_response.data.job_id} for geostore {geostore_id}",
+                        extra={
+                            "integration_id": str(integration.id),
+                            "job_id": job_response.data.job_id,
+                            "geostore_id": geostore_id
+                        }
+                    )
+                    
+            except Exception as e:
+                logger.exception(f"Error creating batch query for geostore {geostore_id}: {e}")
+
+        # Save status for integrated alerts dataset
+        integrated_dataset_status = DatasetStatus(
+            dataset=integrated_dataset_metadata.dataset,
+            version=integrated_dataset_metadata.version,
+            latest_updated_on=integrated_dataset_metadata.updated_on
+        )
+
+        await state_manager.set_state(
+            str(integration.id),
+            "pull_events",
+            integrated_dataset_status.dict(),
+            source_id=DATASET_GFW_INTEGRATED_ALERTS
+        )
+
+    # Set tiered quiet period based on outcome
+    if result["jobs_pending"] > 0:
+        # Jobs still processing - very short quiet period to poll frequently
+        quiet_minutes = 0
+    elif result["batch_jobs_created"] > 0 or result["jobs_completed"] > 0:
+        # Work was done - long quiet period to rate limit expensive operations
+        quiet_minutes = random.randint(240, 720)
+    else:
+        # No updates, no pending jobs - short quiet period for frequent cheap metadata checks
+        quiet_minutes = random.randint(30, 60)
+
+    await state_manager.set_quiet_period(
+        str(integration.id), "integrated_alerts", timedelta(minutes=quiet_minutes)
+    )
+    
+    result["quiet_period_minutes"] = quiet_minutes
+    return result
+
+
+# DEPRECATED: This function is kept for backwards compatibility with any pending sub-actions.
+# New integrated alerts use the batch query approach in action_get_gfw_integrated_alerts.
+async def action_get_gfw_integrated_alerts_for_date_range(
         integration:Integration,
         action_config: GetIntegratedAlertsForGeostoreID
 ):
@@ -248,191 +662,6 @@ async def action_get_integrated_alerts_for_geostore_and_date_range(
 
     return {"dataset": DATASET_GFW_INTEGRATED_ALERTS, "response": dataset_status.dict(), "total_alerts": total_alerts}
 
-
-async def action_get_dataset_and_geostores(integration: Integration, action_config: GetDatasetAndGeostoresConfig):
-    auth_config = get_auth_config(integration)
-    dataapi = DataAPI(
-        username=auth_config.email,
-        password=auth_config.password.get_secret_value()
-    )
-
-    fire_dataset_metadata = None
-    integrated_dataset_metadata = None
-
-    fire_alerts_actions_triggered = 0
-    integrated_alerts_actions_triggered = 0
-
-    geostore_ids = await state_manager.get_geostore_ids(action_config.aoi_data.id)
-
-    # Date ranges are in whole days, so we round to next midnight.
-    end_date = (datetime.now(tz=timezone.utc) + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    start_date = end_date - timedelta(days=action_config.pull_events_config.integrated_alerts_lookback_days)
-
-    if action_config.pull_events_config.include_fire_alerts:
-        fire_dataset_metadata = await dataapi.get_dataset_metadata(DATASET_NASA_VIIRS_FIRE_ALERTS)
-        fire_dataset_status = await state_manager.get_state(
-            str(integration.id),
-            "pull_events",
-            DATASET_NASA_VIIRS_FIRE_ALERTS
-        )
-
-        if fire_dataset_status:
-            logger.info(f"Saved fire dataset status: {fire_dataset_status}")
-            try:
-                fire_dataset_status = DatasetStatus.parse_obj(fire_dataset_status)
-            except ValidationError:
-                logger.exception(
-                    f"Invalid fire dataset status: {fire_dataset_status}. Setting it from metadata..."
-                )
-                fire_dataset_status = DatasetStatus(
-                    dataset=fire_dataset_metadata.dataset,
-                    version=fire_dataset_metadata.version,
-                )
-        else:
-            fire_dataset_status = DatasetStatus(
-                dataset=fire_dataset_metadata.dataset,
-                version=fire_dataset_metadata.version,
-            )
-
-            # If I've saved a status for this dataset, compare 'updated_on' timestamp to avoid redundant queries.
-        if not action_config.pull_events_config.force_fetch and fire_dataset_status.latest_updated_on >= fire_dataset_metadata.updated_on:
-            msg = f"No updates reported for dataset '{DATASET_NASA_VIIRS_FIRE_ALERTS}' so skipping nasa_viirs_fire_alerts queries"
-            logger.info(
-                msg,
-                extra={
-                    "integration_id": str(integration.id),
-                    "integration_login": auth_config.email,
-                    "dataset_updated_on": fire_dataset_metadata.updated_on.isoformat(),
-                },
-            )
-            await log_action_activity(
-                integration_id=integration.id,
-                action_id="get_dataset_and_geostores",
-                level=LogLevel.INFO,
-                title=msg,
-                data={"dataset_updated_on": fire_dataset_metadata.updated_on.isoformat()}
-            )
-            fire_dataset_metadata = None
-
-    if action_config.pull_events_config.include_integrated_alerts:
-        integrated_dataset_metadata = await dataapi.get_dataset_metadata(DATASET_GFW_INTEGRATED_ALERTS)
-        integrated_dataset_status = await state_manager.get_state(
-            str(integration.id),
-            "pull_events",
-            DATASET_GFW_INTEGRATED_ALERTS
-        )
-
-        if integrated_dataset_status:
-            logger.info(f"Saved integrated dataset status: {integrated_dataset_status}")
-            try:
-                integrated_dataset_status = DatasetStatus.parse_obj(integrated_dataset_status)
-            except ValidationError:
-                logger.exception(
-                    f"Invalid integrated dataset status: {integrated_dataset_status}. Setting it from metadata..."
-                )
-                integrated_dataset_status = DatasetStatus(
-                    dataset=integrated_dataset_metadata.dataset,
-                    version=integrated_dataset_metadata.version,
-                )
-        else:
-            integrated_dataset_status = DatasetStatus(
-                dataset=integrated_dataset_metadata.dataset,
-                version=integrated_dataset_metadata.version,
-            )
-
-            # If I've saved a status for this dataset, compare 'updated_on' timestamp to avoid redundant queries.
-        if not action_config.pull_events_config.force_fetch and integrated_dataset_status.latest_updated_on >= integrated_dataset_metadata.updated_on:
-            msg = f"No updates reported for dataset '{DATASET_GFW_INTEGRATED_ALERTS}' so skipping integrated_alerts queries"
-            logger.info(
-                msg,
-                extra={
-                    "integration_id": str(integration.id),
-                    "integration_login": auth_config.email,
-                    "dataset_updated_on": integrated_dataset_metadata.updated_on.isoformat(),
-                },
-            )
-            await log_action_activity(
-                integration_id=integration.id,
-                action_id="get_dataset_and_geostores",
-                level=LogLevel.INFO,
-                title=msg,
-                data={"dataset_updated_on": integrated_dataset_metadata.updated_on.isoformat()}
-            )
-            integrated_dataset_metadata = None
-
-    # Check if any of the datasets is valid to trigger sub-actions
-    if any([fire_dataset_metadata, integrated_dataset_metadata]):
-        for geostore_id in geostore_ids:
-            for lower, upper in generate_date_pairs(start_date, end_date):
-                if fire_dataset_metadata:
-                    # Trigger "get_nasa_viirs_fire_alerts" sub-action
-                    config = GetNasaVIIRSFireAlertsForGeostoreID(
-                        integration_id=str(integration.id),
-                        geostore_id=geostore_id.decode('utf8'),
-                        date_range=(lower, upper),
-                        lowest_confidence=action_config.pull_events_config.fire_alerts_lowest_confidence,
-                        dataset=fire_dataset_metadata
-                    )
-
-                    await trigger_action(
-                        integration.id,
-                        "get_nasa_viirs_fire_alerts_for_geostore_and_date_range",
-                        config=config
-                    )
-                    fire_alerts_actions_triggered += 1
-
-                if integrated_dataset_metadata:
-                    # Trigger "get_gfw_integrated_alerts" sub-action
-                    config = GetIntegratedAlertsForGeostoreID(
-                        integration_id=str(integration.id),
-                        geostore_id=geostore_id.decode('utf8'),
-                        date_range=(lower, upper),
-                        lowest_confidence=action_config.pull_events_config.integrated_alerts_lowest_confidence,
-                        dataset=integrated_dataset_metadata
-                    )
-
-                    await trigger_action(
-                        integration.id,
-                        "get_integrated_alerts_for_geostore_and_date_range",
-                        config=config
-                    )
-                    integrated_alerts_actions_triggered += 1
-
-    # Save status for both datasets.
-    if fire_dataset_metadata:
-        fire_dataset_status = DatasetStatus(
-            dataset=fire_dataset_metadata.dataset,
-            version=fire_dataset_metadata.version,
-            latest_updated_on=fire_dataset_metadata.updated_on
-        )
-
-        await state_manager.set_state(
-            str(integration.id),
-            "pull_events",
-            fire_dataset_status.dict(),
-            source_id=DATASET_NASA_VIIRS_FIRE_ALERTS
-        )
-
-    if integrated_dataset_metadata:
-        integrated_dataset_status = DatasetStatus(
-            dataset=integrated_dataset_metadata.dataset,
-            version=integrated_dataset_metadata.version,
-            latest_updated_on=integrated_dataset_metadata.updated_on
-        )
-
-        await state_manager.set_state(
-            str(integration.id),
-            "pull_events",
-            integrated_dataset_status.dict(),
-            source_id=DATASET_GFW_INTEGRATED_ALERTS
-        )
-
-    return {
-        "fire_alerts_actions_triggered": fire_alerts_actions_triggered,
-        "integrated_alerts_actions_triggered": integrated_alerts_actions_triggered
-    }
-
-
 async def action_get_nasa_viirs_fire_alerts_for_geostore_and_date_range(
         integration: Integration,
         action_config: GetNasaVIIRSFireAlertsForGeostoreID
@@ -451,7 +680,7 @@ async def action_get_nasa_viirs_fire_alerts_for_geostore_and_date_range(
     )
 
     if fire_alerts:
-        logger.info(f"Fire alerts pulled with success.")
+        logger.info(f"Total fire alerts fetched: {len(fire_alerts)}")
         transformed_data = [transform_fire_alert(alert) for alert in fire_alerts]
         await handle_transformed_data(
             transformed_data,

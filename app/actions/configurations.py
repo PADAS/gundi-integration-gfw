@@ -87,6 +87,12 @@ class PullEventsConfig(PullActionConfiguration):
         description="Force fetch even if in a quiet period."
     )
 
+    partition_geometry: bool = pydantic.Field(
+        False,
+        title="Partition geometry",
+        description="Split the AOI geometry into smaller partitions for querying. Enable this for very large AOIs to improve query performance."
+    )
+
     partition_interval_size_in_degrees: float = FieldWithUIOptions(
         1.0,
         title="Partition interval size in degrees",
@@ -103,13 +109,14 @@ class PullEventsConfig(PullActionConfiguration):
     ui_global_options: GlobalUISchemaOptions = GlobalUISchemaOptions(
         order=[
             "gfw_share_link_url",
-            "partition_interval_size_in_degrees",
             "include_fire_alerts",
             "fire_lookback_days",
             "fire_alerts_lowest_confidence",
             "include_integrated_alerts",
             "integrated_alerts_lookback_days",
             "integrated_alerts_lowest_confidence",
+            "partition_geometry",
+            "partition_interval_size_in_degrees",
             "force_fetch"
         ],
     )
@@ -117,11 +124,12 @@ class PullEventsConfig(PullActionConfiguration):
     class Config:
         @staticmethod
         def schema_extra(schema: dict):
-            # Remove lookback days and confidence from the root properties
+            # Remove conditional fields from the root properties
             schema["properties"].pop("fire_alerts_lowest_confidence", None)
             schema["properties"].pop("fire_lookback_days", None)
             schema["properties"].pop("integrated_alerts_lookback_days", None)
             schema["properties"].pop("integrated_alerts_lowest_confidence", None)
+            schema["properties"].pop("partition_interval_size_in_degrees", None)
 
             # Show region_code OR latitude & longitude & distance based on search_parameter
             schema.update({
@@ -183,11 +191,39 @@ class PullEventsConfig(PullActionConfiguration):
                             }
                         }
                     }
+                }, {
+                    "if": {
+                        "properties": {
+                            "partition_geometry": {
+                                "const": True
+                            }
+                        }
+                    },
+                    "then": {
+                        "required": ["partition_interval_size_in_degrees"],
+                        "properties": {
+                            "partition_interval_size_in_degrees": {
+                                "type": "number",
+                                "title": "Partition interval size in degrees",
+                                "default": 1.0,
+                                "maximum": 1.0,
+                                "minimum": 0.1,
+                                "multipleOf": 0.01,
+                                "description": "Size of the partition interval in degrees."
+                            }
+                        }
+                    }
                 }]
             })
 
 
-class GetDatasetAndGeostoresConfig(InternalActionConfiguration):
+class GetFireAlertsDatasetAndGeostoresConfig(InternalActionConfiguration):
+    integration_id: str
+    pull_events_config: PullEventsConfig
+    aoi_data: AOIData
+
+
+class GetIntegratedAlertsDatasetAndGeostoresConfig(InternalActionConfiguration):
     integration_id: str
     pull_events_config: PullEventsConfig
     aoi_data: AOIData
