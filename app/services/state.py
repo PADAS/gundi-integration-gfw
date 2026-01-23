@@ -64,12 +64,27 @@ class IntegrationStateManager:
                     f"integration_state.{aoi_id}.geostore_ids"
                 )
             
-    async def set_geostores_id_ttl(self, aoi_id: str, ttl: int):
+    async def set_geostore_ids_ttl(self, aoi_id: str, ttl: int):
         for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
             with attempt:
                 await self.db_client.expire(
-                    f"integration_state.{aoi_id}.geostore_ids",
+                    f"integration_state.{aoi_id}.geostore_ids_ttl",
                     ttl
+                )
+
+    async def get_geostore_ids_ttl(self, aoi_id: str):
+        for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
+            with attempt:
+                return await self.db_client.get(
+                    f"integration_state.{aoi_id}.geostore_ids_ttl"
+                )
+            
+    async def clear_geostore_ids(self, aoi_id: str):
+        for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
+            with attempt:
+                await self.db_client.delete(
+                    f"integration_state.{aoi_id}.geostore_ids", 
+                    f"integration_state.{aoi_id}.geostore_ids_ttl"
                 )
 
     # Default TTL for pending jobs: 24 hours
