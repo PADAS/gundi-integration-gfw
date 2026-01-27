@@ -7,8 +7,10 @@ import random
 import re
 import backoff
 from enum import Enum
+from urllib.parse import urlparse, parse_qs
 
 import httpx
+from pydantic import HttpUrl
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Set, Tuple, Dict, Any
 
@@ -101,6 +103,53 @@ class GFWClientException(Exception):
     pass
 
 
+class DownloadLinkExpiredException(Exception):
+    """Raised when a batch job's download link has expired."""
+    pass
+
+
+def is_download_link_expired(download_link: str) -> bool:
+    """
+    Check if a download link has expired by parsing its Expires parameter.
+    
+    The download_link contains an 'Expires' query parameter with a Unix timestamp.
+    Returns True if the link has expired, False otherwise.
+    """
+    try:
+        parsed = urlparse(download_link)
+        params = parse_qs(parsed.query)
+        
+        if 'Expires' in params:
+            expires_timestamp = int(params['Expires'][0])
+            expires_at = datetime.fromtimestamp(expires_timestamp, tz=timezone.utc)
+            return datetime.now(tz=timezone.utc) >= expires_at
+        
+        # If no Expires param, assume it's valid
+        return False
+    except (ValueError, KeyError, IndexError):
+        # If we can't parse, assume it's valid and let the request fail naturally
+        return False
+
+
+def get_download_link_expiry(download_link: str) -> Optional[datetime]:
+    """
+    Get the expiry datetime of a download link.
+    
+    Returns the expiry datetime or None if it can't be parsed.
+    """
+    try:
+        parsed = urlparse(download_link)
+        params = parse_qs(parsed.query)
+        
+        if 'Expires' in params:
+            expires_timestamp = int(params['Expires'][0])
+            return datetime.fromtimestamp(expires_timestamp, tz=timezone.utc)
+        
+        return None
+    except (ValueError, KeyError, IndexError):
+        return None
+
+
 class AOIAttributes(pydantic.BaseModel):
     name: Optional[str]
     application: Optional[str]
@@ -128,6 +177,19 @@ class AOIData(pydantic.BaseModel):
     id: str
     attributes: AOIAttributes
 
+
+class JobResponse(pydantic.BaseModel):
+    class Data(pydantic.BaseModel):
+        job_id: str
+        job_link: Optional[HttpUrl] = None  # May be null when polling job status
+        status: str
+        message: Optional[str] = None
+        download_link: Optional[HttpUrl] = None
+        failed_geometries_link: Optional[HttpUrl] = None
+        progress: Optional[str] = None  # May not be present in all responses
+
+    data: Data
+    status: str # "success" or ?
 
 class GeostoreAttributes(pydantic.BaseModel):
     geojson: dict
@@ -279,8 +341,9 @@ class DatasetFields(pydantic.BaseModel):
 class IntegratedAlertsConfidenceEnum(str, Enum):
     high = 'high'
     highest = 'highest'
+    nominal = 'nominal'
 
-IntegratedAlertsConfidenceEnumOrder = [IntegratedAlertsConfidenceEnum.high, IntegratedAlertsConfidenceEnum.highest]
+IntegratedAlertsConfidenceEnumOrder = [IntegratedAlertsConfidenceEnum.nominal, IntegratedAlertsConfidenceEnum.high, IntegratedAlertsConfidenceEnum.highest]
 
 class NasaViirsFireAlertConfidenceEnum(str, Enum):
     nominal = 'nominal'
@@ -325,20 +388,17 @@ class DataAPI:
     async def get_access_token(self):
 
         async with httpx.AsyncClient(timeout=DEFAULT_REQUEST_TIMEOUT) as client:
-            try:
-                response = await client.post(
-                    url=f"{self.DATA_API_URL}/auth/token",
-                    data={"username": self._username, "password": self._password},
-                    follow_redirects=True
-                )
-            except Exception as e:
-                logger.exception(f"Failed to get an access token for username {self._username}. {e}")
-            else:
-                if httpx.codes.is_success(response.status_code):
-                    dapitoken = DataAPIToken.parse_obj(response.json()["data"])
-                    return dapitoken
-
-            raise DataAPIAuthException(f"Failed to get an access token for username {self._username}.")
+            response = await client.post(
+                url=f"{self.DATA_API_URL}/auth/token",
+                data={"username": self._username, "password": self._password},
+                follow_redirects=True
+            )
+            
+            # Raise HTTPStatusError for non-success status codes so backoff can retry
+            response.raise_for_status()
+            
+            dapitoken = DataAPIToken.parse_obj(response.json()["data"])
+            return dapitoken
 
     async def auth_generator(self):
         """
@@ -358,8 +418,8 @@ class DataAPI:
                     ttl = (expire_at - present).total_seconds()
                     logger.debug(f"Using cached auth, expires in {ttl} seconds.")
 
-            except DataAPIAuthException as e:
-                logger.exception(f"Failed to authenticate with GFW Data API: {e}")
+            except httpx.HTTPStatusError as e:
+                logger.exception(f"Failed to authenticate with GFW Data API for user {self._username}: {e}")
                 raise e
             else:
                 yield token
@@ -585,6 +645,62 @@ class DataAPI:
 
         return await fn()
 
+    @backoff.on_exception(custom_backoff, (httpx.TimeoutException, httpx.HTTPStatusError),
+                          max_tries=3, 
+                          on_giveup=giveup_handler, raise_on_giveup=False,
+                          on_backoff=backoff_hdlr)
+    async def query_batch(
+        self,
+        *,
+        dataset: str,
+        fields: Set[str],
+        date_field: str,
+        daterange: Tuple[datetime, datetime],
+        extra_where: str = "",
+        geostore_ids: List[str]
+    ):
+
+        api_key = await self.get_a_valid_api_key()
+        headers = {"x-api-key": api_key.api_key}
+
+        fields = {"latitude", "longitude"} | fields or set()
+
+        lower_bound, upper_bound = daterange
+
+        lower_date = lower_bound.strftime("%Y-%m-%d")
+        upper_date = upper_bound.strftime("%Y-%m-%d")
+
+        sql_query = f"SELECT {','.join(fields)} FROM results WHERE ({date_field} >= '{lower_date}' AND {date_field} <= '{upper_date}')"
+        if extra_where:
+            sql_query += f" AND {extra_where}"
+
+        logger.debug(f"Batch querying dataset {dataset} with sql: {sql_query}")
+        payload = {
+            'geostore_ids': geostore_ids,
+            'sql': sql_query,
+        }
+
+        async def fn():
+            async with httpx.AsyncClient(timeout=DEFAULT_REQUEST_TIMEOUT) as client:
+
+                response = await client.post(f"{self.DATA_API_URL}/dataset/{dataset}/latest/query/batch",
+                    headers=headers,
+                    json=payload,
+                    follow_redirects=True
+                )
+
+                if httpx.codes.is_success(response.status_code):
+                    data = response.json()
+                    return data 
+                else:
+                    logger.error(
+                        f"Failed getting data for dataset {dataset}. status: {response.status_code}, text: {response.text}",
+                        extra=payload,
+                    )
+                    response.raise_for_status() 
+
+        return await fn()
+
     @backoff.on_exception(backoff.expo, (httpx.TimeoutException, httpx.HTTPStatusError), max_tries=3, on_backoff=backoff_hdlr)
     async def get_gfw_integrated_alerts(self, *, geostore_id: str,date_range: Tuple[datetime, datetime],
                                         lowest_confidence: IntegratedAlertsConfidenceEnum = IntegratedAlertsConfidenceEnum.highest,
@@ -611,7 +727,35 @@ class DataAPI:
             )
         
         return [IntegratedAlert.parse_obj(alert) for alert in alerts] if alerts else []
+
+    @backoff.on_exception(backoff.expo, (httpx.TimeoutException, httpx.HTTPStatusError), max_tries=3, on_backoff=backoff_hdlr)
+    async def query_batch_gfw_integrated_alerts(self, *, geostore_id: str,date_range: Tuple[datetime, datetime],
+                                        lowest_confidence: IntegratedAlertsConfidenceEnum = IntegratedAlertsConfidenceEnum.highest,
+                                          semaphore: asyncio.Semaphore = None):
+
+        batch_result = None
+        try:
+            index = IntegratedAlertsConfidenceEnumOrder.index(lowest_confidence)
+            confidence_values = IntegratedAlertsConfidenceEnumOrder[index:] 
+            confidence_values = ' OR '.join(f'gfw_integrated_alerts__confidence = \'{confidence_value.value}\'' for confidence_value in confidence_values)
+            extra_where = f"({confidence_values})"
+        except ValueError:
+            extra_where = ''
+            logger.warning(f"Invalid confidence value: {lowest_confidence}. Using all confidence values.")
+
+        async with semaphore:
+            fields = {"gfw_integrated_alerts__date", "gfw_integrated_alerts__confidence"}
+            batch_result = await self.query_batch(
+                dataset="gfw_integrated_alerts",
+                date_field="gfw_integrated_alerts__date",
+                daterange=date_range,
+                fields=fields,
+                extra_where=extra_where,
+                geostore_ids=[geostore_id]
+            )
         
+        return batch_result
+
     @backoff.on_exception(backoff.expo, (httpx.TimeoutException, httpx.HTTPStatusError), max_tries=3, on_backoff=backoff_hdlr)
     async def get_nasa_viirs_fire_alerts(self, *, geostore_id: str,date_range: Tuple[datetime, datetime],
                                          lowest_confidence: NasaViirsFireAlertConfidenceEnum = NasaViirsFireAlertConfidenceEnum.high,
@@ -640,6 +784,36 @@ class DataAPI:
             )
         
         return [NasaViirsFireAlert.parse_obj(alert) for alert in alerts] if alerts else []
+        
+
+    @backoff.on_exception(backoff.expo, (httpx.TimeoutException, httpx.HTTPStatusError), max_tries=3, on_backoff=backoff_hdlr)
+    async def query_batch_nasa_viirs_fire_alerts(self, *, geostore_id: str,date_range: Tuple[datetime, datetime],
+                                         lowest_confidence: NasaViirsFireAlertConfidenceEnum = NasaViirsFireAlertConfidenceEnum.high,
+                                         semaphore: asyncio.Semaphore = None):
+
+        try:
+            index = NasaViirsFireAlertConfidenceEnumOrder.index(lowest_confidence)
+            confidence_values = NasaViirsFireAlertConfidenceEnumOrder[index:] 
+            confidence_values = [str(confidence_value.value).lower()[:1] for confidence_value in confidence_values]
+            confidence_values = ' OR '.join(f'confidence__cat = \'{value}\'' for value in confidence_values)
+            extra_where = f"({confidence_values})"
+        except ValueError:
+            extra_where = ''
+            logger.warning(f"Invalid confidence value: {lowest_confidence}. Using all confidence values.")
+
+        async with semaphore:
+            # fields = {"confidence__cat", "alert__date", "frp__MW", "bright_ti4__K", "bright_ti5__K"}
+            fields = {"confidence__cat", "alert__date"} 
+            batch_result = await self.query_batch(
+                dataset="nasa_viirs_fire_alerts",
+                date_field="alert__date",
+                daterange=date_range,
+                fields=fields,    
+                extra_where=extra_where,
+                geostore_ids=[geostore_id]
+            )
+        
+        return batch_result
         
 
     @backoff.on_exception(backoff.expo, (httpx.TimeoutException, httpx.HTTPStatusError), max_tries=3, factor=3)
@@ -704,3 +878,83 @@ class DataAPI:
             fields_response = DatasetFields.parse_obj(content)
 
             return fields_response.data
+
+
+    @backoff.on_exception(backoff.expo, (httpx.TimeoutException, httpx.HTTPStatusError), max_tries=3, factor=3)
+    async def get_job_status(self, job_link: str) -> JobResponse.Data:
+        """
+        Poll a batch job's status using its job_link.
+        
+        Returns the job data with status, download_link, etc.
+        """
+        api_key = await self.get_a_valid_api_key()
+        headers = {"x-api-key": api_key.api_key}
+
+        async with httpx.AsyncClient(timeout=DEFAULT_REQUEST_TIMEOUT) as client:
+            response = await client.get(
+                job_link,
+                headers=headers,
+                follow_redirects=True
+            )
+            response.raise_for_status()
+
+            if httpx.codes.is_success(response.status_code):
+                data = response.json()
+                return JobResponse.parse_obj(data).data
+
+    @backoff.on_exception(backoff.expo, (httpx.TimeoutException,), max_tries=3, factor=3)
+    async def download_job_results(self, download_link: str) -> List[dict]:
+        """
+        Download JSON results from a completed batch job's download_link.
+        
+        The response is an array of objects with 'result' lists and 'fid' strings:
+        [
+            {"result": [{alert}, {alert}, ...], "fid": "..."},
+            {"result": [{alert}, {alert}, ...], "fid": "..."},
+            ...
+        ]
+        
+        Returns a flattened list of alert records from all result arrays.
+        
+        Raises:
+            DownloadLinkExpiredException: If the download link has expired (either
+                detected via Expires parameter or 403 response).
+        """
+        # Check if the download link has expired before making the request
+        if is_download_link_expired(download_link):
+            expiry = get_download_link_expiry(download_link)
+            raise DownloadLinkExpiredException(
+                f"Download link expired at {expiry.isoformat() if expiry else 'unknown time'}"
+            )
+        
+        api_key = await self.get_a_valid_api_key()
+        headers = {"x-api-key": api_key.api_key}
+
+        async with httpx.AsyncClient(timeout=DEFAULT_REQUEST_TIMEOUT) as client:
+            response = await client.get(
+                download_link,
+                headers=headers,
+                follow_redirects=True
+            )
+            
+            # Handle 403 Forbidden as expired link
+            if response.status_code == 403:
+                raise DownloadLinkExpiredException(
+                    f"Download link returned 403 Forbidden (likely expired)"
+                )
+            
+            response.raise_for_status()
+
+            if httpx.codes.is_success(response.status_code):
+                data = response.json()
+                
+                # Response is an array of objects with 'result' lists
+                # Flatten all result arrays into a single list of alerts
+                if isinstance(data, list):
+                    alerts = []
+                    for item in data:
+                        if isinstance(item, dict) and 'result' in item:
+                            alerts.extend(item['result'])
+                    return alerts
+                
+                return []

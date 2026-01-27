@@ -87,23 +87,9 @@ class PullEventsConfig(PullActionConfiguration):
         description="Force fetch even if in a quiet period."
     )
 
-    partition_interval_size_in_degrees: float = FieldWithUIOptions(
-        1.0,
-        title="Partition interval size in degrees",
-        description="Size of the partition interval in degrees.",
-        le=1.0,
-        ge=0.1,
-        multiple_of=0.01,
-        # ui_options=UIOptions(
-        #     widget="range",  # This will be rendered ad a range slider
-        # )
-        # TODO: Check the hardcoded step in the UI
-    )
-
     ui_global_options: GlobalUISchemaOptions = GlobalUISchemaOptions(
         order=[
             "gfw_share_link_url",
-            "partition_interval_size_in_degrees",
             "include_fire_alerts",
             "fire_lookback_days",
             "fire_alerts_lowest_confidence",
@@ -117,13 +103,13 @@ class PullEventsConfig(PullActionConfiguration):
     class Config:
         @staticmethod
         def schema_extra(schema: dict):
-            # Remove lookback days and confidence from the root properties
+            # Remove conditional fields from the root properties
             schema["properties"].pop("fire_alerts_lowest_confidence", None)
             schema["properties"].pop("fire_lookback_days", None)
             schema["properties"].pop("integrated_alerts_lookback_days", None)
             schema["properties"].pop("integrated_alerts_lowest_confidence", None)
 
-            # Show region_code OR latitude & longitude & distance based on search_parameter
+            # Show conditional fields based on include_* toggles
             schema.update({
                 "allOf": [{
                     "if": {
@@ -187,7 +173,13 @@ class PullEventsConfig(PullActionConfiguration):
             })
 
 
-class GetDatasetAndGeostoresConfig(InternalActionConfiguration):
+class GetFireAlertsDatasetAndGeostoresConfig(InternalActionConfiguration):
+    integration_id: str
+    pull_events_config: PullEventsConfig
+    aoi_data: AOIData
+
+
+class GetIntegratedAlertsDatasetAndGeostoresConfig(InternalActionConfiguration):
     integration_id: str
     pull_events_config: PullEventsConfig
     aoi_data: AOIData
