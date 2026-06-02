@@ -229,9 +229,12 @@ class IntegratedAlert(pydantic.BaseModel):
 
     @pydantic.root_validator
     def compute_confidence(cls, values):
-        values["confidence"] = (
-            1.0 if values.get("confidence_label", "") in {"high", "highest"} else 0.0
-        )
+        confidence_map = {
+            "nominal": 0.0,
+            "high": 0.5,
+            "highest": 1.0,
+        }
+        values["confidence"] = confidence_map.get(values.get("confidence_label", ""), 0.0)
         return values
 
 class NasaViirsFireAlert(pydantic.BaseModel):
