@@ -12,7 +12,7 @@ from urllib.parse import urlparse, parse_qs
 import httpx
 from pydantic import HttpUrl
 from datetime import datetime, timedelta, timezone
-from typing import Optional, List, Set, Tuple, Dict, Any
+from typing import ClassVar, Optional, List, Set, Tuple, Dict, Any
 
 
 logger = logging.getLogger(__name__)
@@ -220,6 +220,12 @@ class IntegratedAlert(pydantic.BaseModel):
     recorded_at: datetime = pydantic.Field(..., alias="gfw_integrated_alerts__date")
     intensity: float = pydantic.Field(0.0, alias="gfw_integrated_alerts__intensity")
 
+    CONFIDENCE_MAP: ClassVar[dict] = {
+        "nominal": 0.0,
+        "high": 0.5,
+        "highest": 1.0,
+    }
+
     @pydantic.validator(
         "recorded_at",
         pre=True,
@@ -229,12 +235,7 @@ class IntegratedAlert(pydantic.BaseModel):
 
     @pydantic.root_validator
     def compute_confidence(cls, values):
-        confidence_map = {
-            "nominal": 0.0,
-            "high": 0.5,
-            "highest": 1.0,
-        }
-        values["confidence"] = confidence_map.get(values.get("confidence_label", ""), 0.0)
+        values["confidence"] = cls.CONFIDENCE_MAP.get(values.get("confidence_label", ""), 0.0)
         return values
 
 class NasaViirsFireAlert(pydantic.BaseModel):
