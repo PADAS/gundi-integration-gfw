@@ -292,3 +292,19 @@ async def test_fetch_integrated_alerts_backs_off_2_times_then_succeed(
     assert len([log for log in caplog.messages if "Backing off" in log]) == 5  # 1 from get_api_keys + 4 from get_alerts
     assert len(alerts) == len(f_get_alerts_response['data'])
 
+
+
+@pytest.mark.parametrize("label,expected", [
+    ("nominal", 0.0),
+    ("high", 0.5),
+    ("highest", 1.0),
+])
+def test_integrated_alert_confidence_mapping(label, expected):
+    from app.actions.gfwclient import IntegratedAlert
+    alert = IntegratedAlert(**{
+        "latitude": 0.0,
+        "longitude": 0.0,
+        "gfw_integrated_alerts__confidence": label,
+        "gfw_integrated_alerts__date": "2024-01-01",
+    })
+    assert alert.confidence == expected
