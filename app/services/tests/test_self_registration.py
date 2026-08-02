@@ -784,3 +784,12 @@ async def test_crontab_schedule_decorator(
         tz_offset=0
     )
     assert action_pull_observations.crontab_schedule == expected_schedule
+
+
+def test_gfw_integration_type_name_setting_default():
+    # Production registration resolves the display name from
+    # app.settings.INTEGRATION_TYPE_NAME (see app/settings/integration.py);
+    # the template's test_register_integration_with_type_name_setting proves
+    # that setting flows into the registration payload.
+    import app.settings.integration as integration_settings
+    assert integration_settings.INTEGRATION_TYPE_NAME == "Global Forest Watch"
