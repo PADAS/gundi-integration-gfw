@@ -14,7 +14,8 @@ jobs:
       - name: Install pip
         run: python -m ensurepip --upgrade
       - name: Install pip tools
-        run: pip install pip-tools
+        # pip-tools 7.6.0 imports typing_extensions but omits it from its dependencies
+        run: pip install pip-tools typing_extensions
       - name: Install compile dependencies
         run: pip-compile --output-file=requirements.txt requirements-base.in requirements-dev.in requirements.in
       - name: Install dependencies
