@@ -855,7 +855,7 @@ class DataAPI:
             return matches[1]
 
         logger.error("Unable to parse AOI from URL: %s (resolved to: %s)", url, head.url)
-        raise GFWClientException(f"Unable to parse AOI from URL: '{url}'")
+        raise GFWClientException(f"Unable to parse AOI from URL: '{url}' (resolved to: '{head.url}')")
 
 
     @backoff.on_exception(backoff.constant, httpx.HTTPError, max_tries=3, interval=10)

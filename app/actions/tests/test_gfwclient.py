@@ -325,8 +325,10 @@ async def test_aoi_from_url_raises_on_unparseable_url():
     respx.head(final_url).respond(status_code=200)
 
     client = DataAPI(username="test@example.com", password="test_password")
-    with pytest.raises(GFWClientException):
+    with pytest.raises(GFWClientException) as excinfo:
         await client.aoi_from_url(short_url)
+    assert short_url in str(excinfo.value)
+    assert final_url in str(excinfo.value)
 
 
 @pytest.mark.parametrize("label,expected", [
