@@ -6,7 +6,7 @@ import httpx
 import respx
 from unittest.mock import patch
 
-from app.actions.gfwclient import DataAPI, DataAPIKeysResponse
+from app.actions.gfwclient import DataAPI, DataAPIKeysResponse, GFWClientException
 
 @pytest.fixture
 def fast_backoff():
@@ -292,6 +292,41 @@ async def test_fetch_integrated_alerts_backs_off_2_times_then_succeed(
     assert len([log for log in caplog.messages if "Backing off" in log]) == 5  # 1 from get_api_keys + 4 from get_alerts
     assert len(alerts) == len(f_get_alerts_response['data'])
 
+
+
+@pytest.mark.asyncio
+async def test_aoi_from_url_parses_globalforestwatch_url_directly():
+    client = DataAPI(username="test@example.com", password="test_password")
+    aoi_id = await client.aoi_from_url(
+        "https://www.globalforestwatch.org/map/aoi/64020c320ec654001bada78e/?mainMap=eyJzaG93QW5hbHlzaXMiOnRydWV9"
+    )
+    assert aoi_id == "64020c320ec654001bada78e"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_aoi_from_url_follows_redirect_to_globalnaturewatch():
+    short_url = "https://gfw.global/3Jhekkw"
+    final_url = "https://globalnaturewatch.org/map/aoi/64020c320ec654001bada78e/?mainMap=eyJzaG93QW5hbHlzaXMiOnRydWV9"
+    respx.head(short_url).respond(status_code=302, headers={"Location": final_url})
+    respx.head(final_url).respond(status_code=200)
+
+    client = DataAPI(username="test@example.com", password="test_password")
+    aoi_id = await client.aoi_from_url(short_url)
+    assert aoi_id == "64020c320ec654001bada78e"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_aoi_from_url_raises_on_unparseable_url():
+    short_url = "https://gfw.global/3Jhekkw"
+    final_url = "https://globalnaturewatch.org/some/other/page"
+    respx.head(short_url).respond(status_code=302, headers={"Location": final_url})
+    respx.head(final_url).respond(status_code=200)
+
+    client = DataAPI(username="test@example.com", password="test_password")
+    with pytest.raises(GFWClientException):
+        await client.aoi_from_url(short_url)
 
 
 @pytest.mark.parametrize("label,expected", [
