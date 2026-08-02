@@ -844,18 +844,18 @@ class DataAPI:
         Extracts the AOI ID from a GFW share link URL.
         """
 
-        URL_PATTERN = ".*globalforestwatch.org.*aoi/([^/]+).*"
+        URL_PATTERN = r".*(?:globalforestwatch|globalnaturewatch)\.org.*aoi/([^/]+).*"
         if matches := re.match(URL_PATTERN, url):
             return matches[1]
-        
+
         async with httpx.AsyncClient(timeout=DEFAULT_REQUEST_TIMEOUT) as client:
             head = await client.head(url, follow_redirects=True)
 
-        try:
-            matches = re.match(URL_PATTERN, str(head.url))
+        if matches := re.match(URL_PATTERN, str(head.url)):
             return matches[1]
-        except IndexError:
-            logger.error("Unable to parse AOI from globalforestwatch URL: %s", url)
+
+        logger.error("Unable to parse AOI from URL: %s (resolved to: %s)", url, head.url)
+        raise GFWClientException(f"Unable to parse AOI from URL: '{url}' (resolved to: '{head.url}')")
 
 
     @backoff.on_exception(backoff.constant, httpx.HTTPError, max_tries=3, interval=10)

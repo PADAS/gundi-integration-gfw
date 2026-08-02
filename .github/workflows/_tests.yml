@@ -14,7 +14,8 @@ jobs:
       - name: Install pip
         run: python -m ensurepip --upgrade
       - name: Install pip tools
-        run: pip install pip-tools
+        # some pip-tools releases (e.g. 7.6.0) import typing_extensions without declaring it as a dependency
+        run: pip install pip-tools typing_extensions
       - name: Install compile dependencies
         run: pip-compile --output-file=requirements.txt requirements-base.in requirements-dev.in requirements.in
       - name: Install dependencies
