@@ -23,6 +23,8 @@ asyncmock==0.4.2
     # via -r requirements-dev.in
 attrs==26.1.0
     # via aiohttp
+backoff==2.2.1
+    # via -r requirements.in
 certifi==2026.7.22
     # via
     #   httpcore
