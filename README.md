@@ -68,16 +68,53 @@ Options:
   --help  Show this message and exit.
 
 Commands:
-  aoi-info                Fetch AOI Information for the provided URL
-  dataset-metadata        Dataset Metadata
-  datasets                List Datasets
-  geostore-info           Fetch Geostore Information for the provided URL
-  get-dataset-fields      Get Dataset Fields
-  get-datasets            Get Datasets
-  gfw-integrated-alerts   Get GFW Integrated Alerts for the provided URL
-  nasa-viirs-fire-alerts  Get NASA Viirs Fire Alerts for the provided URL
+  aoi-info                        Fetch AOI Information for the...
+  batch-query                     Batch Query GFW Integrated Alerts
+  dataset-metadata                Dataset Metadata
+  datasets                        List Datasets
+  geostore-info                   Fetch Geostore Information for the...
+  get-aoi-data                    Get Geostore IDs
+  get-api-keys                    Get API Keys
+  get-dataset-fields              Get Dataset Fields
+  get-datasets                    Get Datasets
+  gfw-integrated-alerts           Get GFW Integrated Alerts for the...
+  gfw-integrated-alerts-optimized
+                                  Get GFW Integrated Alerts using...
+  nasa-viirs-fire-alerts          Get NASA Viirs Fire Alerts for the...
+  nasa-viirs-fire-alerts-by-geostore
+                                  Query NASA VIIRS Fire Alerts for a...
+  sample-integration              Sample what GFW has for a Gundi...
 ```
 
 Each command has it's own arguments. Try running one to see what arguments it requires.
+
+### Diagnosing "I'm not seeing data"
+
+Most reports of missing data come down to the connection's confidence thresholds
+(defaults are the strictest: fire alerts `high`, integrated alerts `highest`), the
+lookback window, or the pipeline simply being in a quiet period. The `sample_data`
+diagnostic shows all of that in one place: it queries GFW for the AOI with **no**
+confidence filter and reports, per feed, how many alerts exist at each confidence
+level and how many the current settings let through, plus dataset freshness,
+quiet-period state, and pending batch jobs.
+
+**From the Gundi portal:** open the integration and run the **Sample Data** action.
+The summary appears in the action result and in the integration's activity log.
+
+The diagnostic queries GFW's synchronous query endpoint, whereas the real
+integrated-alerts pull submits a batch job. On a very large AOI with a wide
+lookback the synchronous query can time out where the batch job succeeds; the
+feed then reports `query failed` rather than a count. Narrow the window with the
+lookback override if that happens.
+
+**From the CLI** (needs `GUNDI_API_BASE_URL` and the `GUNDI_OAUTH_*` env vars, or their older `KEYCLOAK_*` names, so it can
+look up the integration; GFW credentials come from the integration's auth config):
+
+```bash
+python3 cli.py sample-integration <integration-uuid>
+python3 cli.py sample-integration <integration-uuid> --days 7 --sample-size 10
+python3 cli.py sample-integration <integration-uuid> --as-json
+python3 cli.py sample-integration <integration-uuid> --use-state   # also read Redis state; needs REDIS_HOST
+```
 
 

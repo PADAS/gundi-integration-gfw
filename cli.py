@@ -1,5 +1,5 @@
 import click
-from click_datetime import Datetime
+from click.types import DateTime
 from datetime import datetime, timedelta, timezone
 import asyncio
 from app.actions.gfwclient import DataAPI, Geostore, GeostoreView,CreatedGeostore, \
@@ -8,7 +8,7 @@ from app.actions.gfwclient import DataAPI, Geostore, GeostoreView,CreatedGeostor
 from app.actions import utils
 from shapely.geometry import GeometryCollection, shape, mapping
 from app.services.state import IntegrationStateManager
-
+import json
 import logging
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -62,7 +62,7 @@ def geostore_info(url, username, password):
 @cli.command(help="Get NASA Viirs Fire Alerts for the provided URL")
 @click.argument('url', type=str)
 @click.option('--days', type=int, required=False, default=2, help="Number of days to look back for fire alerts")
-@click.option('--end_date', type=Datetime(format="%Y-%m-%d"), help='End date in YYYY-MM-DD format')
+@click.option('--end_date', type=DateTime(), help='End date in YYYY-MM-DD format')
 @click.option('--lowest_confidence', '-lc', type=click.Choice(NasaViirsFireAlertConfidenceEnumOrder), default=NasaViirsFireAlertConfidenceEnum.high)
 @add_options(common_options)
 def nasa_viirs_fire_alerts(url, username, password, days, lowest_confidence, end_date=None):
@@ -100,7 +100,7 @@ def nasa_viirs_fire_alerts(url, username, password, days, lowest_confidence, end
 @cli.command(help="Get GFW Integrated Alerts for the provided URL")
 @click.argument('url', type=str)
 @click.option('--days', type=int, required=False, default=2, help="Number of days to look back for fire alerts")
-@click.option('--end_date', type=Datetime(format="%Y-%m-%d"), help='End date in YYYY-MM-DD format')
+@click.option('--end_date', type=DateTime(), help='End date in YYYY-MM-DD format')
 @click.option('--lowest_confidence', '-lc', type=click.Choice(IntegratedAlertsConfidenceEnum), default=IntegratedAlertsConfidenceEnum.high)
 @add_options(common_options)
 def gfw_integrated_alerts(url, username, password, days, lowest_confidence, end_date=None):
@@ -136,6 +136,7 @@ def gfw_integrated_alerts(url, username, password, days, lowest_confidence, end_
                 print(item.json(indent=2))
             
     asyncio.run(fn())
+
 
 @cli.command(help="List Datasets")
 def datasets():
@@ -174,7 +175,6 @@ def get_datasets(search=None):
     for d in val:
         print(d.dataset)
 
-
 @cli.command(help="Get Dataset Fields")
 @click.argument('dataset', type=str, required=True)
 @click.option('--version', type=str, required=False, default="latest")
@@ -187,6 +187,101 @@ def get_dataset_fields(dataset, version):
     val = asyncio.run(fn())
     for v in val:
         print(v.json())
+
+@cli.command(help="Get API Keys")
+@add_options(common_options)
+def get_api_keys(username, password):
+    client = DataAPI(username=username, password=password)
+    async def fn():
+        api_keys = await client.get_api_keys()  # a list of DataAPIKey models
+        print(json.dumps([key.dict() for key in api_keys], indent=2, default=str))
+
+    asyncio.run(fn())
+
+@cli.command(help="Batch Query GFW Integrated Alerts")
+@add_options(common_options)
+@click.option('--geostore_id', type=str, required=True)
+@click.option('--dataset', type=click.Choice([
+    "gfw_integrated_alerts",
+    ]), required=True)
+def batch_query(username, password, geostore_id, dataset):
+    client = DataAPI(username=username, password=password)
+    async def fn():
+        date_range = (datetime.now(tz=timezone.utc) - timedelta(days=7), datetime.now(tz=timezone.utc))
+        if dataset == "gfw_integrated_alerts":
+            result = await client.query_batch_gfw_integrated_alerts(geostore_id=geostore_id,
+             date_range=date_range, lowest_confidence=IntegratedAlertsConfidenceEnum.nominal,
+              semaphore=asyncio.Semaphore(5))
+        print(json.dumps(result, indent=2))
+    asyncio.run(fn())
+
+@cli.command(help="Query NASA VIIRS Fire Alerts for a geostore ID (last 7 days, all confidence levels)")
+@add_options(common_options)
+@click.option('--geostore_id', type=str, required=True)
+def nasa_viirs_fire_alerts_by_geostore(username, password, geostore_id):
+    client = DataAPI(username=username, password=password)
+    async def fn():
+        date_range = (datetime.now(tz=timezone.utc) - timedelta(days=7), datetime.now(tz=timezone.utc))
+        result = await client.get_nasa_viirs_fire_alerts(geostore_id=geostore_id,
+            date_range=date_range, lowest_confidence=NasaViirsFireAlertConfidenceEnum.low,
+            semaphore=asyncio.Semaphore(5))
+        print(result)
+    asyncio.run(fn())
+
+
+@cli.command(help="Get Geostore IDs")
+@add_options(common_options)
+@click.option('--url', type=str, required=True)
+def get_aoi_data(username, password, url):
+    client = DataAPI(username=username, password=password)
+
+    async def fn():
+        aoi_id = await client.aoi_from_url(url)
+        aoi_data = await client.get_aoi(aoi_id=aoi_id)
+        print(aoi_data.json(indent=2))
+    asyncio.run(fn())
+
+@cli.command(help="Sample what GFW has for a Gundi integration vs. what its settings send on to EarthRanger")
+@click.argument('integration_id', type=str)
+@click.option('--days', type=click.IntRange(1, 30), default=None, help="Lookback days for both feeds (default: each feed's configured lookback)")
+@click.option('--sample-size', type=click.IntRange(0, 25), default=5, help="Example records to show per confidence level")
+@click.option('--use-state/--no-state', default=False,
+              help="Also read Redis state (AOI cache, quiet periods, pending jobs). Needs REDIS_HOST. Default: off")
+@click.option('--as-json', is_flag=True, default=False, help="Print the raw result as JSON instead of a report")
+def sample_integration(integration_id, days, sample_size, use_state, as_json):
+    """
+    Needs Gundi API env vars (GUNDI_API_BASE_URL, GUNDI_OAUTH_* or the older KEYCLOAK_*) to look up the integration.
+    GFW credentials come from the integration's own auth config.
+    """
+    from gundi_client_v2 import GundiClient
+    from app.actions.configurations import SampleDataConfig
+    from app.actions.handlers import sample_integration_data
+    from app.actions.utils import format_sample_report
+
+    async def fn():
+        try:
+            async with GundiClient() as gundi:
+                integration = await gundi.get_integration_details(integration_id)
+        except Exception as e:
+            raise click.ClickException(
+                f"Could not load integration {integration_id} from Gundi "
+                f"(check GUNDI_API_BASE_URL / GUNDI_OAUTH_* env vars): {type(e).__name__}: {e}"
+            )
+        # Keep stdout to the report (or the JSON document) so --as-json output is parseable.
+        click.echo(f"Integration: {integration.name} ({integration.id})", err=as_json)
+        result = await sample_integration_data(
+            integration,
+            SampleDataConfig(lookback_days=days, sample_size=sample_size),
+            use_state=use_state,
+        )
+        if as_json:
+            print(json.dumps(result, indent=2, default=str))
+        else:
+            print(format_sample_report(result))
+        if "error" in result:
+            raise SystemExit(1)
+
+    asyncio.run(fn())
 
 
 if __name__ == '__main__':
