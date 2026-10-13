@@ -97,7 +97,11 @@ class PullEventsConfig(PullActionConfiguration):
             "include_integrated_alerts",
             "integrated_alerts_lookback_days",
             "integrated_alerts_lowest_confidence",
-            "force_fetch"
+            "force_fetch",
+            "run_on_schedule",  # template toggle from PullActionConfiguration
+            # react-jsonschema-form throws if any property is missing from
+            # ui:order; "*" places any future template fields after ours.
+            "*",
         ],
     )
 
