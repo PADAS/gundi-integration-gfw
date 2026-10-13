@@ -4,14 +4,14 @@ GFW-owned tests for the IntegrationStateManager methods this integration added
 template-owned test_state_manager.py merges cleanly on upstream syncs.
 """
 import asyncio
-import inspect
 import json
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import redis.asyncio as redis
 
 from app.services import state as state_module
+from app.services.activity_logger import ephemeral_run
 from app.services.state import IntegrationStateManager
 
 
@@ -23,17 +23,36 @@ def fast_redis_retry(mocker):
     )
 
 
-def flaky_once(return_value):
-    """An async redis call that raises RedisError on the first call, then succeeds."""
-    calls = {"n": 0}
+class FlakyRedis:
+    """A redis client whose every call raises RedisError once, then succeeds."""
 
-    async def call(*args, **kwargs):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise redis.RedisError("blip")
-        return return_value
+    def __init__(self):
+        self.failed_once = set()
+        self.pipe = MagicMock()
+        self.pipe.execute = self._call("execute", [True, 1])
 
-    return call
+    def _call(self, name, value):
+        async def call(*args, **kwargs):
+            if name not in self.failed_once:
+                self.failed_once.add(name)
+                raise redis.RedisError("blip")
+            return value
+        return call
+
+    def __getattr__(self, name):
+        values = {
+            "get": json.dumps({"id": "aoi-1"}),
+            "exists": 1,
+            "setex": True,
+            "delete": 1,
+            "smembers": {b"job-1"},
+            "srem": 1,
+        }
+        if name == "pipeline":
+            return lambda **kwargs: self.pipe
+        if name in values:
+            return self._call(name, values[name])
+        raise AttributeError(name)
 
 
 async def run_with_ticker(coro):
@@ -54,36 +73,50 @@ async def run_with_ticker(coro):
     return result, ticks
 
 
+GFW_METHODS = {
+    "set_quiet_period": lambda m: m.set_quiet_period("int-1", "fire_alerts", 60),
+    "is_quiet_period": lambda m: m.is_quiet_period("int-1", "fire_alerts"),
+    "set_aoi_data": lambda m: m.set_aoi_data("int-1", {"id": "aoi-1"}),
+    "get_aoi_data": lambda m: m.get_aoi_data("int-1"),
+    "add_pending_job": lambda m: m.add_pending_job("int-1", "get_gfw_integrated_alerts", {"job_id": "job-1"}),
+    "get_pending_jobs": lambda m: m.get_pending_jobs("int-1", "get_gfw_integrated_alerts"),
+    "remove_pending_job": lambda m: m.remove_pending_job("int-1", "get_gfw_integrated_alerts", "job-1"),
+}
+
+
 @pytest.mark.asyncio
-async def test_get_aoi_data_retries_without_blocking_the_event_loop(fast_redis_retry):
+@pytest.mark.parametrize("method", GFW_METHODS)
+async def test_gfw_state_methods_retry_without_blocking_the_event_loop(fast_redis_retry, method):
+    manager = IntegrationStateManager()
+    manager.db_client = FlakyRedis()
+
+    _, ticks = await run_with_ticker(GFW_METHODS[method](manager))
+
+    assert ticks >= 2, f"{method}: retry back-off blocked the event loop"
+
+
+@pytest.mark.asyncio
+async def test_get_aoi_data_returns_cached_value_after_a_retry(fast_redis_retry):
+    manager = IntegrationStateManager()
+    manager.db_client = FlakyRedis()
+
+    assert await manager.get_aoi_data("int-1") == {"id": "aoi-1"}
+
+
+MUTATING_METHODS = ["set_quiet_period", "set_aoi_data", "add_pending_job", "remove_pending_job"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", MUTATING_METHODS)
+async def test_gfw_mutating_methods_noop_on_ephemeral_run(method):
+    # Ephemeral runs use a synthetic integration id; any write is a permanent orphan.
     manager = IntegrationStateManager()
     manager.db_client = MagicMock()
-    manager.db_client.get = flaky_once(json.dumps({"id": "aoi-1"}))
+    manager.db_client.pipeline = MagicMock()
+    token = ephemeral_run.set(True)
+    try:
+        await GFW_METHODS[method](manager)
+    finally:
+        ephemeral_run.reset(token)
 
-    result, ticks = await run_with_ticker(manager.get_aoi_data("int-1"))
-
-    assert result == {"id": "aoi-1"}
-    assert ticks >= 2, "retry back-off blocked the event loop"
-
-
-@pytest.mark.asyncio
-async def test_is_quiet_period_retries_without_blocking_the_event_loop(fast_redis_retry):
-    manager = IntegrationStateManager()
-    manager.db_client = MagicMock()
-    manager.db_client.exists = flaky_once(1)
-
-    result, ticks = await run_with_ticker(manager.is_quiet_period("int-1", "fire_alerts"))
-
-    assert result == 1
-    assert ticks >= 2, "retry back-off blocked the event loop"
-
-
-def test_no_state_method_iterates_stamina_synchronously():
-    # stamina's sync iterator sleeps with time.sleep, which stalls the loop
-    # (see app/services/retry_policies.py). Every method must use `async for`.
-    source = inspect.getsource(state_module)
-    sync_loops = [
-        line for line in source.splitlines()
-        if "for attempt in stamina.retry_context(" in line and "async for" not in line
-    ]
-    assert sync_loops == []
+    assert manager.db_client.method_calls == []

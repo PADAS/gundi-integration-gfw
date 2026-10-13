@@ -24,7 +24,7 @@ from app.services.action_scheduler import crontab_schedule
 from app.services.gundi import send_events_to_gundi
 from app.services.state import IntegrationStateManager
 
-from gundi_client_v2.errors import GundiClientError
+from gundi_client_v2.errors import GundiAPIError
 from gundi_core.schemas.v2 import Integration, LogLevel
 from pydantic import ValidationError
 
@@ -49,9 +49,11 @@ async def handle_transformed_data(transformed_data, integration_id, action_id):
             events=transformed_data,
             integration_id=integration_id
         )
-    except (httpx.HTTPError, GundiClientError) as e:
-        # gundi-client-v2 3.x raises GundiAPIError (a GundiClientError, not an
-        # httpx error) for 4xx/5xx responses; transport failures still surface as httpx errors.
+    except (httpx.HTTPError, GundiAPIError) as e:
+        # gundi-client-v2 3.x raises GundiAPIError (not an httpx error) for 4xx/5xx
+        # responses; transport failures still surface as httpx errors. Our own
+        # Gundi OAuth failures (AuthenticationError) are deliberately not caught:
+        # they are not Sensors API errors, and the runner classifies them.
         msg = f'Sensors API returned error for integration_id: {integration_id}. Exception: {e}'
         logger.exception(
             msg,
@@ -408,14 +410,24 @@ async def action_get_gfw_integrated_alerts(integration: Integration, action_conf
                         integrated_alerts = [IntegratedAlert.parse_obj(alert) for alert in alerts_data]
                         transformed_data = [transform_integrated_alert(alert) for alert in integrated_alerts]
                         
-                        await handle_transformed_data(
+                        send_result = await handle_transformed_data(
                             transformed_data,
                             str(integration.id),
                             action_id
                         )
+                        if isinstance(send_result, dict) and "error" in send_result:
+                            # Keep the job pending so the next poll re-downloads and
+                            # re-sends it (bounded by the pending-job TTL); removing it
+                            # here would drop this batch of alerts for good.
+                            result["jobs_pending"] += 1
+                            logger.warning(
+                                f"Send to Gundi failed for job {job_id}; leaving it pending for retry",
+                                extra={"integration_id": str(integration.id), "job_id": job_id},
+                            )
+                            continue
                         result["total_alerts_processed"] += len(integrated_alerts)
                         logger.info(f"Processed {len(integrated_alerts)} integrated alerts from job {job_id}")
-                    
+
                     result["jobs_completed"] += 1
                     await state_manager.remove_pending_job(str(integration.id), action_id, job_id)
                     

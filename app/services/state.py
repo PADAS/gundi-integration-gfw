@@ -83,6 +83,8 @@ class IntegrationStateManager:
                 )
 
     async def set_quiet_period(self, integration_id: str, action_id:str, quiet_period: int | timedelta):
+        if _skip_on_ephemeral_run("set_quiet_period", integration_id, action_id):
+            return
         async for attempt in stamina.retry_context(**REDIS_RETRY):
             with attempt:
                 if quiet_period: # handle both int and timedelta
@@ -110,6 +112,8 @@ class IntegrationStateManager:
         
         This provides resilience if the GFW API is temporarily unavailable.
         """
+        if _skip_on_ephemeral_run("set_aoi_data", integration_id, "aoi_data"):
+            return
         ttl = ttl_seconds or self.DEFAULT_AOI_DATA_TTL_SECONDS
         async for attempt in stamina.retry_context(**REDIS_RETRY):
             with attempt:
@@ -155,6 +159,8 @@ class IntegrationStateManager:
         job_id = job_data.get("job_id")
         if not job_id:
             raise ValueError("job_data must include a 'job_id' field")
+        if _skip_on_ephemeral_run("add_pending_job", integration_id, action_id):
+            return
         
         ttl = ttl_seconds or self.DEFAULT_JOB_TTL_SECONDS
         job_key = self._pending_job_key(integration_id, action_id, job_id)
@@ -224,9 +230,11 @@ class IntegrationStateManager:
         
         Deletes the job data key and removes the job ID from the tracking set.
         """
+        if _skip_on_ephemeral_run("remove_pending_job", integration_id, action_id):
+            return
         job_key = self._pending_job_key(integration_id, action_id, job_id)
         set_key = self._pending_jobs_set_key(integration_id, action_id)
-        
+
         async for attempt in stamina.retry_context(**REDIS_RETRY):
             with attempt:
                 pipeline = self.db_client.pipeline(transaction=True)
