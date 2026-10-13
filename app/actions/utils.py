@@ -166,3 +166,21 @@ def format_sample_report(result: dict) -> str:
     lines.append("")
     lines.append(result.get("message", ""))
     return "\n".join(lines)
+
+
+def unique_alerts(alerts, *, confidence_of):
+    """
+    Drop duplicate alerts, keeping first occurrence and order.
+
+    Date-chunked queries are inclusive on both ends, so an alert dated on a
+    chunk boundary is returned by both neighbouring chunks.
+    """
+    seen = set()
+    result = []
+    for alert in alerts:
+        key = (alert.latitude, alert.longitude, _alert_date(alert), confidence_of(alert))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(alert)
+    return result

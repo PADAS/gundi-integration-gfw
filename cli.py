@@ -292,15 +292,15 @@ def batch_query(username, password, geostore_id, dataset):
         print(json.dumps(result, indent=2))
     asyncio.run(fn())
 
-@cli.command(help="Query NASA VIIRS Fire Alerts")
+@cli.command(help="Query NASA VIIRS Fire Alerts for a geostore ID (last 7 days, all confidence levels)")
 @add_options(common_options)
 @click.option('--geostore_id', type=str, required=True)
-def nasa_viirs_fire_alerts(username, password, geostore_id):
+def nasa_viirs_fire_alerts_by_geostore(username, password, geostore_id):
     client = DataAPI(username=username, password=password)
     async def fn():
         date_range = (datetime.now(tz=timezone.utc) - timedelta(days=7), datetime.now(tz=timezone.utc))
         result = await client.get_nasa_viirs_fire_alerts(geostore_id=geostore_id,
-            date_range=date_range, lowest_confidence=IntegratedAlertsConfidenceEnum.nominal,
+            date_range=date_range, lowest_confidence=NasaViirsFireAlertConfidenceEnum.low,
             semaphore=asyncio.Semaphore(5))
         print(result)
     asyncio.run(fn())
@@ -320,8 +320,8 @@ def get_aoi_data(username, password, url):
 
 @cli.command(help="Sample what GFW has for a Gundi integration vs. what its settings send on to EarthRanger")
 @click.argument('integration_id', type=str)
-@click.option('--days', type=int, default=None, help="Lookback days for both feeds (default: each feed's configured lookback)")
-@click.option('--sample-size', type=int, default=5, help="Example records to show per confidence level")
+@click.option('--days', type=click.IntRange(1, 30), default=None, help="Lookback days for both feeds (default: each feed's configured lookback)")
+@click.option('--sample-size', type=click.IntRange(0, 25), default=5, help="Example records to show per confidence level")
 @click.option('--use-state/--no-state', default=False,
               help="Also read Redis state (AOI cache, quiet periods, pending jobs). Needs REDIS_HOST. Default: off")
 @click.option('--as-json', is_flag=True, default=False, help="Print the raw result as JSON instead of a report")

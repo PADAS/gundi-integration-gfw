@@ -22,8 +22,8 @@ from app.actions.configurations import (
     SampleDataConfig,
     get_pull_events_config,
 )
-from app.actions.utils import summarize_by_confidence, fire_alert_confidence, integrated_alert_confidence
-from app.services.errors import ConfigurationNotFound
+from app.actions.utils import summarize_by_confidence, fire_alert_confidence, integrated_alert_confidence, unique_alerts
+from app.services.errors import ConfigurationNotFound, ConfigurationValidationError
 from app.services.action_scheduler import trigger_action
 from app.services.activity_logger import activity_logger, log_action_activity
 from app.services.action_scheduler import crontab_schedule
@@ -711,7 +711,9 @@ async def _feed_pipeline_state(integration_id, dataapi, *, dataset, quiet_period
     state = {}
     errors = []
     try:
-        metadata = await dataapi.get_dataset_metadata(dataset)
+        metadata = await dataapi.get_dataset_metadata(dataset)  # None on a non-2xx response
+        if metadata is None:
+            raise ValueError(f"GFW returned no metadata for dataset '{dataset}'")
         state["dataset_updated_on"] = metadata.updated_on.isoformat()
     except Exception as e:
         state["dataset_updated_on"] = None
@@ -733,6 +735,42 @@ async def _feed_pipeline_state(integration_id, dataapi, *, dataset, quiet_period
     if errors:
         state["state_errors"] = errors
     return state
+
+
+async def _disabled_feed():
+    return {"enabled": False}
+
+
+async def _sample_feed(integration_id, dataapi, *, dataset, days, end_date, chunk_days, query,
+                       confidence_of, confidence_order, lowest_confidence, sample_size,
+                       quiet_period_key, pending_jobs_action_id=None, use_state=True):
+    """Query one feed over `days` (no confidence filter), summarize it, and attach pipeline state."""
+    feed = {"enabled": True, "dataset": dataset, "lookback_days": days}
+    try:
+        chunks = await asyncio.gather(*(
+            query((lower, upper))
+            for lower, upper in generate_date_pairs(end_date - timedelta(days=days), end_date, interval=chunk_days)
+        ))
+        # Chunks are inclusive on both ends, so boundary-day alerts come back twice.
+        alerts = unique_alerts([a for chunk in chunks for a in chunk], confidence_of=confidence_of)
+        feed.update(summarize_by_confidence(
+            alerts,
+            confidence_of=confidence_of,
+            confidence_order=confidence_order,
+            lowest_confidence=lowest_confidence,
+            sample_size=sample_size,
+        ))
+    except Exception as e:
+        logger.exception(f"sample_data: {dataset} query failed for {integration_id}: {e}")
+        feed["error"] = str(e)
+    feed.update(await _feed_pipeline_state(
+        integration_id, dataapi,
+        dataset=dataset,
+        quiet_period_key=quiet_period_key,
+        pending_jobs_action_id=pending_jobs_action_id,
+        use_state=use_state,
+    ))
+    return feed
 
 
 def _feed_message(label, feed):
@@ -760,13 +798,10 @@ async def sample_integration_data(
     """
     integration_id = str(integration.id)
 
-    pull_config = get_pull_events_config(integration)
-    if not pull_config:
-        return {"error": f"Integration {integration_id} has no valid 'pull_events' configuration to sample against."}
-
     try:
+        pull_config = get_pull_events_config(integration)
         auth_config = get_auth_config(integration)
-    except ConfigurationNotFound as e:
+    except (ConfigurationNotFound, ConfigurationValidationError) as e:
         return {"error": str(e)}
 
     dataapi = dataapi or DataAPI(username=auth_config.email, password=auth_config.password.get_secret_value())
@@ -801,70 +836,55 @@ async def sample_integration_data(
         "sampled_at": datetime.now(tz=timezone.utc).isoformat(),
     }
 
-    if pull_config.include_fire_alerts:
-        days = action_config.lookback_days or pull_config.fire_lookback_days
-        feed = {"enabled": True, "dataset": DATASET_NASA_VIIRS_FIRE_ALERTS, "lookback_days": days}
-        try:
-            alerts = []
-            for lower, upper in generate_date_pairs(end_date - timedelta(days=days), end_date, interval=7):
-                alerts.extend(await dataapi.get_nasa_viirs_fire_alerts(
-                    geostore_id=geostore_id,
-                    date_range=(lower, upper),
-                    lowest_confidence=NasaViirsFireAlertConfidenceEnum.low,  # everything
-                    semaphore=sema,
-                ))
-            feed.update(summarize_by_confidence(
-                alerts,
-                confidence_of=fire_alert_confidence,
-                confidence_order=NasaViirsFireAlertConfidenceEnumOrder,
-                lowest_confidence=pull_config.fire_alerts_lowest_confidence,
-                sample_size=action_config.sample_size,
-            ))
-        except Exception as e:
-            logger.exception(f"sample_data: fire alerts query failed for {integration_id}: {e}")
-            feed["error"] = str(e)
-        feed.update(await _feed_pipeline_state(
+    async def fire_feed():
+        return await _sample_feed(
             integration_id, dataapi,
             dataset=DATASET_NASA_VIIRS_FIRE_ALERTS,
+            days=action_config.lookback_days or pull_config.fire_lookback_days,
+            end_date=end_date,
+            chunk_days=7,
+            query=lambda date_range: dataapi.get_nasa_viirs_fire_alerts(
+                geostore_id=geostore_id,
+                date_range=date_range,
+                lowest_confidence=NasaViirsFireAlertConfidenceEnum.low,  # everything
+                semaphore=sema,
+            ),
+            confidence_of=fire_alert_confidence,
+            confidence_order=NasaViirsFireAlertConfidenceEnumOrder,
+            lowest_confidence=pull_config.fire_alerts_lowest_confidence,
+            sample_size=action_config.sample_size,
             quiet_period_key="fire_alerts",
             use_state=use_state,
-        ))
-        result["fire_alerts"] = feed
-    else:
-        result["fire_alerts"] = {"enabled": False}
+        )
 
-    if pull_config.include_integrated_alerts:
-        days = action_config.lookback_days or pull_config.integrated_alerts_lookback_days
-        feed = {"enabled": True, "dataset": DATASET_GFW_INTEGRATED_ALERTS, "lookback_days": days}
-        try:
-            alerts = []
-            for lower, upper in generate_date_pairs(end_date - timedelta(days=days), end_date, interval=10):
-                alerts.extend(await dataapi.get_gfw_integrated_alerts(
-                    geostore_id=geostore_id,
-                    date_range=(lower, upper),
-                    lowest_confidence=IntegratedAlertsConfidenceEnum.nominal,  # everything
-                    semaphore=sema,
-                ))
-            feed.update(summarize_by_confidence(
-                alerts,
-                confidence_of=integrated_alert_confidence,
-                confidence_order=IntegratedAlertsConfidenceEnumOrder,
-                lowest_confidence=pull_config.integrated_alerts_lowest_confidence,
-                sample_size=action_config.sample_size,
-            ))
-        except Exception as e:
-            logger.exception(f"sample_data: integrated alerts query failed for {integration_id}: {e}")
-            feed["error"] = str(e)
-        feed.update(await _feed_pipeline_state(
+    async def integrated_feed():
+        return await _sample_feed(
             integration_id, dataapi,
             dataset=DATASET_GFW_INTEGRATED_ALERTS,
+            days=action_config.lookback_days or pull_config.integrated_alerts_lookback_days,
+            end_date=end_date,
+            chunk_days=10,
+            query=lambda date_range: dataapi.get_gfw_integrated_alerts(
+                geostore_id=geostore_id,
+                date_range=date_range,
+                lowest_confidence=IntegratedAlertsConfidenceEnum.nominal,  # everything
+                semaphore=sema,
+            ),
+            confidence_of=integrated_alert_confidence,
+            confidence_order=IntegratedAlertsConfidenceEnumOrder,
+            lowest_confidence=pull_config.integrated_alerts_lowest_confidence,
+            sample_size=action_config.sample_size,
             quiet_period_key="integrated_alerts",
             pending_jobs_action_id=action_get_gfw_integrated_alerts.__name__.replace("action_", ""),
             use_state=use_state,
-        ))
-        result["integrated_alerts"] = feed
-    else:
-        result["integrated_alerts"] = {"enabled": False}
+        )
+
+    # Both feeds, and the date chunks within each, run concurrently; `sema`
+    # inside the client still caps the requests in flight against GFW.
+    result["fire_alerts"], result["integrated_alerts"] = await asyncio.gather(
+        fire_feed() if pull_config.include_fire_alerts else _disabled_feed(),
+        integrated_feed() if pull_config.include_integrated_alerts else _disabled_feed(),
+    )
 
     result["message"] = ". ".join([
         _feed_message("Fire alerts", result["fire_alerts"]),
@@ -873,17 +893,23 @@ async def sample_integration_data(
     return result
 
 
-@activity_logger()
+@activity_logger(on_completion=False)  # the entry below is the completion record
 async def action_sample_data(integration: Integration, action_config: SampleDataConfig):
     """
     Diagnostic: show what GFW has in this connection's AOI and which records the
     current settings let through. Run it from the portal when a user reports missing data.
     """
     result = await sample_integration_data(integration, action_config)
+    if "error" in result:
+        level = LogLevel.ERROR
+    elif any("error" in result.get(feed, {}) for feed in ("fire_alerts", "integrated_alerts")):
+        level = LogLevel.WARNING
+    else:
+        level = LogLevel.INFO
     await log_action_activity(
         integration_id=integration.id,
         action_id=action_sample_data.__name__.replace("action_", ""),
-        level=LogLevel.ERROR if "error" in result else LogLevel.INFO,
+        level=level,
         title=result.get("message") or result["error"],
         data=result,
     )

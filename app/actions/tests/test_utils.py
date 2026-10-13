@@ -177,3 +177,19 @@ def test_report_shows_feed_error_and_top_level_error():
     assert "GFW timed out" in format_sample_report(result)
 
     assert "no geostore" in format_sample_report({"error": "no geostore"})
+
+
+from app.actions.utils import unique_alerts
+
+
+def test_unique_alerts_drops_duplicates_fetched_from_overlapping_date_chunks():
+    boundary = make_integrated("highest", lat=1.0, lon=2.0, date="2026-10-05")
+    same_boundary = make_integrated("highest", lat=1.0, lon=2.0, date="2026-10-05")
+    other_day = make_integrated("highest", lat=1.0, lon=2.0, date="2026-10-06")
+    other_place = make_integrated("highest", lat=1.5, lon=2.0, date="2026-10-05")
+    other_level = make_integrated("high", lat=1.0, lon=2.0, date="2026-10-05")
+
+    result = unique_alerts([boundary, same_boundary, other_day, other_place, other_level], confidence_of=integrated_alert_confidence)
+
+    assert len(result) == 4
+    assert result[0] is boundary

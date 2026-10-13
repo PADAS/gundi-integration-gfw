@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from gundi_core.schemas.v2 import Integration
+from gundi_core.schemas.v2 import Integration, LogLevel
 
 from app.actions.configurations import SampleDataConfig
 from app.actions.gfwclient import (
@@ -231,3 +231,58 @@ async def test_sample_data_can_run_without_redis_state(gfw_integration, mock_dat
     assert result["fire_alerts"]["dataset_updated_on"] == "2026-10-11T00:00:00+00:00"
     assert "quiet_period_active" not in result["fire_alerts"]
     assert "state_errors" not in result["fire_alerts"]
+
+
+@pytest.mark.asyncio
+async def test_sample_data_counts_a_boundary_day_alert_once_across_chunks(gfw_integration, mock_dataapi, mock_state, mock_activity_log):
+    # Date chunks are inclusive on both ends, so an alert on the shared boundary
+    # day comes back from both chunks. It must be counted once.
+    mock_dataapi.get_gfw_integrated_alerts = AsyncMock(return_value=[make_integrated("highest")])
+
+    result = await action_sample_data(integration=gfw_integration, action_config=SampleDataConfig())
+
+    assert mock_dataapi.get_gfw_integrated_alerts.await_count == 2
+    assert result["integrated_alerts"]["available_total"] == 1
+    assert result["integrated_alerts"]["sent_total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_sample_data_names_the_invalid_pull_config_field(gfw_integration, mock_dataapi, mock_state, mock_activity_log):
+    pull_config = next(c for c in gfw_integration.configurations if c.action.value == "pull_events")
+    pull_config.data["fire_lookback_days"] = 99  # le=10
+
+    result = await action_sample_data(integration=gfw_integration, action_config=SampleDataConfig())
+
+    assert "fire_lookback_days" in result["error"]
+    mock_dataapi.get_nasa_viirs_fire_alerts.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_sample_data_reports_missing_dataset_metadata_plainly(gfw_integration, mock_dataapi, mock_state, mock_activity_log):
+    mock_dataapi.get_dataset_metadata = AsyncMock(return_value=None)  # DataAPI returns None on non-2xx
+
+    result = await action_sample_data(integration=gfw_integration, action_config=SampleDataConfig())
+
+    assert result["fire_alerts"]["dataset_updated_on"] is None
+    assert any("no metadata" in e for e in result["fire_alerts"]["state_errors"])
+    assert "NoneType" not in str(result["fire_alerts"]["state_errors"])
+
+
+@pytest.mark.asyncio
+async def test_sample_data_logs_a_feed_failure_as_a_warning(gfw_integration, mock_dataapi, mock_state, mock_activity_log):
+    mock_dataapi.get_nasa_viirs_fire_alerts.side_effect = RuntimeError("GFW timed out")
+
+    await action_sample_data(integration=gfw_integration, action_config=SampleDataConfig())
+
+    assert mock_activity_log.call_args.kwargs["level"] == LogLevel.WARNING
+
+
+@pytest.mark.asyncio
+async def test_sample_data_publishes_only_the_start_event_itself(gfw_integration, mock_dataapi, mock_state, mock_activity_log, mock_publish_event):
+    # The handler writes its own completion entry via log_action_activity; the
+    # decorator's completion event would duplicate the full result payload.
+    await action_sample_data(integration=gfw_integration, action_config=SampleDataConfig())
+
+    assert mock_publish_event.await_count == 1
+    event = mock_publish_event.call_args.kwargs["event"]
+    assert type(event).__name__ == "IntegrationActionStarted"

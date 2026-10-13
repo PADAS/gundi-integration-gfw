@@ -5,7 +5,7 @@ from typing import Optional
 
 from app.actions.core import PullActionConfiguration, AuthActionConfiguration, ExecutableActionMixin, InternalActionConfiguration, GenericActionConfiguration
 from app.actions.gfwclient import AOIData, DatasetResponseItem, IntegratedAlertsConfidenceEnum, NasaViirsFireAlertConfidenceEnum
-from app.services.errors import ConfigurationNotFound
+from app.services.errors import ConfigurationNotFound, ConfigurationValidationError
 from app.services.utils import find_config_for_action, FieldWithUIOptions, UIOptions, GlobalUISchemaOptions
 
 
@@ -223,14 +223,19 @@ class SampleDataConfig(GenericActionConfiguration, ExecutableActionMixin):
     )
 
 
-def get_pull_events_config(integration) -> Optional[PullEventsConfig]:
+def get_pull_events_config(integration) -> PullEventsConfig:
+    """Load the integration's pull_events config, or raise with a reason support can act on."""
     config = find_config_for_action(
         configurations=integration.configurations,
         action_id="pull_events"
     )
     if not config:
-        return None
+        raise ConfigurationNotFound(
+            f"Integration {str(integration.id)} has no 'pull_events' configuration to sample against."
+        )
     try:
         return PullEventsConfig.parse_obj(config.data)
-    except pydantic.ValidationError:
-        return None
+    except pydantic.ValidationError as e:
+        raise ConfigurationValidationError(
+            f"Invalid 'pull_events' configuration for integration {str(integration.id)}: {e}"
+        )
