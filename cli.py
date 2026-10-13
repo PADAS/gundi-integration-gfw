@@ -138,83 +138,6 @@ def gfw_integrated_alerts(url, username, password, days, lowest_confidence, end_
     asyncio.run(fn())
 
 
-@cli.command(help="Get GFW Integrated Alerts using optimized methods")
-@click.argument('url', type=str)
-@click.option('--days', type=int, required=False, default=7, help="Number of days to look back")
-@click.option('--end_date', type=DateTime(), help='End date in YYYY-MM-DD format')
-@click.option('--lowest_confidence', '-lc', type=click.Choice(IntegratedAlertsConfidenceEnum), default=IntegratedAlertsConfidenceEnum.highest)
-@click.option('--max_partitions', type=int, default=10, help="Maximum number of geometry partitions")
-@click.option('--max_concurrent', type=int, default=5, help="Maximum concurrent requests")
-@click.option('--enable_smart_dates', is_flag=True, default=True, help="Enable smart date range optimization")
-@add_options(common_options)
-def gfw_integrated_alerts_optimized(url, username, password, days, lowest_confidence, end_date, max_partitions, max_concurrent, enable_smart_dates):
-    """Test the optimized GFW Integrated Alerts retrieval."""
-    client = DataAPI(username=username, password=password)
-
-    end_date = end_date or datetime.now(tz=timezone.utc)
-    chosen_date_range = (end_date - timedelta(days=days), end_date)
-    
-    async def fn():
-        async with utils.performance_monitor("Optimized GFW Alerts Retrieval") as monitor:
-            # Get AOI and create optimized partitions
-            aoi_id = await client.aoi_from_url(url)
-            print(f'AOI ID: {aoi_id}')
-            
-            aoi_data = await client.get_aoi(aoi_id=aoi_id)
-            print(f'GEOSTORE ID: {aoi_data.attributes.geostore}')
-            
-            geostore_data = await client.get_geostore(geostore_id=aoi_data.attributes.geostore)
-
-            geometry_collection = GeometryCollection(
-                [
-                    shape(feature["geometry"]).buffer(0)
-                    for feature in geostore_data.attributes.geojson["features"]
-                ]
-            )
-            
-            # Create optimized partitions
-            geostore_ids = []
-            partition_count = 0
-            
-            for partition in utils.optimize_geometry_partitioning(
-                geometry_collection=geometry_collection, 
-                max_partitions=max_partitions
-            ):
-                try:
-                    geostore: CreatedGeostore = await client.create_geostore(geometry=mapping(partition))
-                    geostore_ids.append(geostore.gfw_geostore_id)
-                    partition_count += 1
-                except Exception as e:
-                    print(f"Failed to create geostore for partition: {e}")
-            
-            print(f"Created {partition_count} optimized partitions")
-            
-            # Use optimized batch retrieval
-            all_alerts = await client.get_gfw_integrated_alerts_optimized(
-                geostore_ids=geostore_ids,
-                date_range=chosen_date_range,
-                lowest_confidence=lowest_confidence,
-                max_concurrent=max_concurrent,
-                enable_smart_dates=enable_smart_dates
-            )
-            
-            # Process results
-            total_alerts = 0
-            for geostore_id, alerts in all_alerts.items():
-                print(f"Geostore {geostore_id}: {len(alerts)} alerts")
-                total_alerts += len(alerts)
-                for alert in alerts:
-                    print(alert.json(indent=2))
-            
-            monitor.end(
-                total_alerts=total_alerts,
-                partitions=partition_count,
-                geostores=len(geostore_ids),
-                date_range_days=days
-            )
-            
-    asyncio.run(fn())
-
 @cli.command(help="List Datasets")
 def datasets():
     client = DataAPI()
@@ -270,8 +193,8 @@ def get_dataset_fields(dataset, version):
 def get_api_keys(username, password):
     client = DataAPI(username=username, password=password)
     async def fn():
-        api_keys = await client.get_api_keys()
-        print(api_keys.json(indent=2))
+        api_keys = await client.get_api_keys()  # a list of DataAPIKey models
+        print(json.dumps([key.dict() for key in api_keys], indent=2, default=str))
 
     asyncio.run(fn())
 
@@ -344,7 +267,8 @@ def sample_integration(integration_id, days, sample_size, use_state, as_json):
                 f"Could not load integration {integration_id} from Gundi "
                 f"(check GUNDI_API_BASE_URL / GUNDI_OAUTH_* env vars): {type(e).__name__}: {e}"
             )
-        print(f"Integration: {integration.name} ({integration.id})")
+        # Keep stdout to the report (or the JSON document) so --as-json output is parseable.
+        click.echo(f"Integration: {integration.name} ({integration.id})", err=as_json)
         result = await sample_integration_data(
             integration,
             SampleDataConfig(lookback_days=days, sample_size=sample_size),

@@ -12,7 +12,7 @@ from app.actions.gfwclient import (
     NasaViirsFireAlertConfidenceEnum,
     DatasetResponseItem,
 )
-from app.actions.handlers import action_sample_data
+from app.actions.handlers import action_sample_data, DATASET_NASA_VIIRS_FIRE_ALERTS, DATASET_GFW_INTEGRATED_ALERTS
 
 
 INTEGRATION_ID = "779ff3ab-5589-4f4c-9e0a-ae8d6c9edff0"
@@ -76,11 +76,17 @@ def aoi_data():
 @pytest.fixture
 def mock_dataapi(mocker):
     api = MagicMock()
-    api.get_nasa_viirs_fire_alerts = AsyncMock(return_value=[make_fire("l"), make_fire("n"), make_fire("h")])
-    # Lookback windows are queried in date chunks; return alerts on the first chunk only
-    # so counts reflect distinct alerts rather than the number of chunks.
+    # Lookback windows are queried in date chunks; return integrated alerts on
+    # the first chunk only so counts reflect distinct alerts rather than chunks.
     integrated_chunks = iter([[make_integrated("nominal"), make_integrated("highest")]])
-    api.get_gfw_integrated_alerts = AsyncMock(side_effect=lambda **kwargs: next(integrated_chunks, []))
+
+    async def sample_alerts(*, dataset, **kwargs):
+        if dataset == DATASET_NASA_VIIRS_FIRE_ALERTS:
+            return [make_fire("l"), make_fire("n"), make_fire("h")]
+        return next(integrated_chunks, [])
+
+    api.sample_alerts = AsyncMock(side_effect=sample_alerts)
+    api.get_a_valid_api_key = AsyncMock()
     api.get_dataset_metadata = AsyncMock(return_value=DatasetResponseItem(
         created_on="2026-01-01T00:00:00Z", updated_on="2026-10-11T00:00:00Z",
         dataset="x", version="v1", is_latest=True, is_mutable=True,
@@ -128,20 +134,19 @@ async def test_sample_data_reports_available_vs_sent_for_each_feed(gfw_integrati
 
 
 @pytest.mark.asyncio
-async def test_sample_data_queries_gfw_without_a_confidence_filter(gfw_integration, mock_dataapi, mock_state, mock_activity_log):
+async def test_sample_data_queries_every_confidence_level_through_the_raising_path(gfw_integration, mock_dataapi, mock_state, mock_activity_log):
     await action_sample_data(integration=gfw_integration, action_config=SampleDataConfig())
 
-    fire_kwargs = mock_dataapi.get_nasa_viirs_fire_alerts.call_args.kwargs
-    assert fire_kwargs["lowest_confidence"] == NasaViirsFireAlertConfidenceEnum.low
-    assert fire_kwargs["geostore_id"] == "geo-1"
-
-    integrated_kwargs = mock_dataapi.get_gfw_integrated_alerts.call_args.kwargs
-    assert integrated_kwargs["lowest_confidence"] == IntegratedAlertsConfidenceEnum.nominal
-    # 15-day window is queried in 10-day chunks, covering the whole range
-    calls = mock_dataapi.get_gfw_integrated_alerts.call_args_list
-    assert len(calls) == 2
-    spans = sorted((c.kwargs["date_range"] for c in calls), key=lambda r: r[0])
+    calls = mock_dataapi.sample_alerts.call_args_list
+    assert all("lowest_confidence" not in c.kwargs for c in calls)
+    assert all(c.kwargs["geostore_id"] == "geo-1" for c in calls)
+    # 15-day integrated window is queried in 10-day chunks, covering the whole range
+    integrated = [c for c in calls if c.kwargs["dataset"] == DATASET_GFW_INTEGRATED_ALERTS]
+    assert len(integrated) == 2
+    spans = sorted((c.kwargs["date_range"] for c in integrated), key=lambda r: r[0])
     assert (spans[-1][1] - spans[0][0]).days == 15
+    # the client is authenticated once, before the feeds fan out
+    mock_dataapi.get_a_valid_api_key.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -150,13 +155,19 @@ async def test_sample_data_lookback_override_applies_to_both_feeds(gfw_integrati
 
     assert result["fire_alerts"]["lookback_days"] == 2
     assert result["integrated_alerts"]["lookback_days"] == 2
-    start, end = mock_dataapi.get_gfw_integrated_alerts.call_args.kwargs["date_range"]
+    start, end = mock_dataapi.sample_alerts.call_args.kwargs["date_range"]
     assert (end - start).days == 2
 
 
 @pytest.mark.asyncio
 async def test_sample_data_isolates_a_failing_feed(gfw_integration, mock_dataapi, mock_state, mock_activity_log):
-    mock_dataapi.get_nasa_viirs_fire_alerts.side_effect = RuntimeError("GFW timed out")
+    integrated_chunks = iter([[make_integrated("nominal"), make_integrated("highest")]])  # first chunk only
+
+    async def sample_alerts(*, dataset, **kwargs):
+        if dataset == DATASET_NASA_VIIRS_FIRE_ALERTS:
+            raise RuntimeError("GFW timed out")
+        return next(integrated_chunks, [])
+    mock_dataapi.sample_alerts = AsyncMock(side_effect=sample_alerts)
 
     result = await action_sample_data(integration=gfw_integration, action_config=SampleDataConfig())
 
@@ -172,7 +183,7 @@ async def test_sample_data_skips_disabled_feeds(gfw_integration, mock_dataapi, m
     result = await action_sample_data(integration=gfw_integration, action_config=SampleDataConfig())
 
     assert result["fire_alerts"] == {"enabled": False}
-    mock_dataapi.get_nasa_viirs_fire_alerts.assert_not_called()
+    assert all(c.kwargs["dataset"] != DATASET_NASA_VIIRS_FIRE_ALERTS for c in mock_dataapi.sample_alerts.call_args_list)
 
 
 @pytest.mark.asyncio
@@ -209,7 +220,7 @@ async def test_sample_data_reports_missing_pull_config(integration_v2, mock_data
     result = await action_sample_data(integration=integration_v2, action_config=SampleDataConfig())
 
     assert "error" in result
-    mock_dataapi.get_nasa_viirs_fire_alerts.assert_not_called()
+    mock_dataapi.sample_alerts.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -221,6 +232,7 @@ async def test_sample_data_can_run_without_redis_state(gfw_integration, mock_dat
     mock_state.get_state = AsyncMock(side_effect=RuntimeError("redis down"))
     mock_dataapi.aoi_from_url = AsyncMock(return_value="aoi-1")
     mock_dataapi.get_aoi = AsyncMock(return_value=AOIData.parse_obj(aoi_data))
+    mock_dataapi.get_a_valid_api_key = AsyncMock()
 
     result = await sample_integration_data(gfw_integration, SampleDataConfig(), use_state=False)
 
@@ -237,11 +249,13 @@ async def test_sample_data_can_run_without_redis_state(gfw_integration, mock_dat
 async def test_sample_data_counts_a_boundary_day_alert_once_across_chunks(gfw_integration, mock_dataapi, mock_state, mock_activity_log):
     # Date chunks are inclusive on both ends, so an alert on the shared boundary
     # day comes back from both chunks. It must be counted once.
-    mock_dataapi.get_gfw_integrated_alerts = AsyncMock(return_value=[make_integrated("highest")])
+    async def sample_alerts(*, dataset, **kwargs):
+        return [make_integrated("highest")] if dataset == DATASET_GFW_INTEGRATED_ALERTS else []
+    mock_dataapi.sample_alerts = AsyncMock(side_effect=sample_alerts)
 
     result = await action_sample_data(integration=gfw_integration, action_config=SampleDataConfig())
 
-    assert mock_dataapi.get_gfw_integrated_alerts.await_count == 2
+    assert sum(1 for c in mock_dataapi.sample_alerts.call_args_list if c.kwargs["dataset"] == DATASET_GFW_INTEGRATED_ALERTS) == 2
     assert result["integrated_alerts"]["available_total"] == 1
     assert result["integrated_alerts"]["sent_total"] == 1
 
@@ -254,7 +268,7 @@ async def test_sample_data_names_the_invalid_pull_config_field(gfw_integration, 
     result = await action_sample_data(integration=gfw_integration, action_config=SampleDataConfig())
 
     assert "fire_lookback_days" in result["error"]
-    mock_dataapi.get_nasa_viirs_fire_alerts.assert_not_called()
+    mock_dataapi.sample_alerts.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -270,7 +284,11 @@ async def test_sample_data_reports_missing_dataset_metadata_plainly(gfw_integrat
 
 @pytest.mark.asyncio
 async def test_sample_data_logs_a_feed_failure_as_a_warning(gfw_integration, mock_dataapi, mock_state, mock_activity_log):
-    mock_dataapi.get_nasa_viirs_fire_alerts.side_effect = RuntimeError("GFW timed out")
+    async def sample_alerts(*, dataset, **kwargs):
+        if dataset == DATASET_NASA_VIIRS_FIRE_ALERTS:
+            raise RuntimeError("GFW timed out")
+        return []
+    mock_dataapi.sample_alerts = AsyncMock(side_effect=sample_alerts)
 
     await action_sample_data(integration=gfw_integration, action_config=SampleDataConfig())
 

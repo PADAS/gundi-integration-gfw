@@ -595,7 +595,19 @@ class DataAPI:
                           max_tries=3, 
                           on_giveup=giveup_handler, raise_on_giveup=False,
                           on_backoff=backoff_hdlr)
-    async def get_alerts(
+    async def get_alerts(self, **kwargs):
+        """Pipeline query: retries, then gives up quietly (returns None) so a pull run continues."""
+        return await self._query_alerts(**kwargs)
+
+    @backoff.on_exception(custom_backoff, (httpx.TimeoutException, httpx.HTTPStatusError),
+                          max_tries=3,
+                          on_giveup=giveup_handler,
+                          on_backoff=backoff_hdlr)
+    async def get_alerts_or_raise(self, **kwargs):
+        """Same query, but a failure after the retries propagates (used by diagnostics)."""
+        return await self._query_alerts(**kwargs)
+
+    async def _query_alerts(
         self,
         *,
         dataset: str,
@@ -704,6 +716,39 @@ class DataAPI:
                     response.raise_for_status() 
 
         return await fn()
+
+    # Per-dataset query shape shared by the pipeline wrappers below and sample_alerts().
+    ALERT_QUERY_SPECS: ClassVar[dict] = {
+        "gfw_integrated_alerts": dict(
+            date_field="gfw_integrated_alerts__date",
+            fields={"gfw_integrated_alerts__date", "gfw_integrated_alerts__confidence"},
+            model=IntegratedAlert,
+        ),
+        "nasa_viirs_fire_alerts": dict(
+            date_field="alert__date",
+            fields={"confidence__cat", "alert__date"},
+            model=NasaViirsFireAlert,
+        ),
+    }
+
+    async def sample_alerts(self, *, dataset: str, geostore_id: str, date_range: Tuple[datetime, datetime],
+                            semaphore: asyncio.Semaphore):
+        """
+        Diagnostic query: every alert in the window at every confidence level.
+        Unlike the pipeline wrappers, a query that still fails after the retries
+        raises, so a failed query is never reported as "no alerts".
+        """
+        spec = self.ALERT_QUERY_SPECS[dataset]
+        async with semaphore:
+            rows = await self.get_alerts_or_raise(
+                dataset=dataset,
+                date_field=spec["date_field"],
+                daterange=date_range,
+                fields=spec["fields"],
+                extra_where="",
+                geostore_id=geostore_id,
+            )
+        return [spec["model"].parse_obj(row) for row in rows or []]
 
     @backoff.on_exception(backoff.expo, (httpx.TimeoutException, httpx.HTTPStatusError), max_tries=3, on_backoff=backoff_hdlr)
     async def get_gfw_integrated_alerts(self, *, geostore_id: str,date_range: Tuple[datetime, datetime],

@@ -826,6 +826,13 @@ async def sample_integration_data(
     if not geostore_id:
         return {"error": f"No Geostore associated with AOI {aoi_data.id}.", "aoi_id": aoi_data.id}
 
+    # Authenticate once before the feeds fan out: the client's auth header is
+    # an async generator, and concurrent first calls would contend for it.
+    try:
+        await dataapi.get_a_valid_api_key()
+    except Exception as e:
+        return {"error": f"Could not authenticate with Global Forest Watch Data API: {e}", "aoi_id": aoi_data.id}
+
     # Match pull_events: whole days, ending at the next UTC midnight.
     end_date = (datetime.now(tz=timezone.utc) + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
 
@@ -843,10 +850,10 @@ async def sample_integration_data(
             days=action_config.lookback_days or pull_config.fire_lookback_days,
             end_date=end_date,
             chunk_days=7,
-            query=lambda date_range: dataapi.get_nasa_viirs_fire_alerts(
+            query=lambda date_range: dataapi.sample_alerts(
+                dataset=DATASET_NASA_VIIRS_FIRE_ALERTS,
                 geostore_id=geostore_id,
                 date_range=date_range,
-                lowest_confidence=NasaViirsFireAlertConfidenceEnum.low,  # everything
                 semaphore=sema,
             ),
             confidence_of=fire_alert_confidence,
@@ -864,10 +871,10 @@ async def sample_integration_data(
             days=action_config.lookback_days or pull_config.integrated_alerts_lookback_days,
             end_date=end_date,
             chunk_days=10,
-            query=lambda date_range: dataapi.get_gfw_integrated_alerts(
+            query=lambda date_range: dataapi.sample_alerts(
+                dataset=DATASET_GFW_INTEGRATED_ALERTS,
                 geostore_id=geostore_id,
                 date_range=date_range,
-                lowest_confidence=IntegratedAlertsConfidenceEnum.nominal,  # everything
                 semaphore=sema,
             ),
             confidence_of=integrated_alert_confidence,
