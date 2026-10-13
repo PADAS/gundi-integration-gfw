@@ -94,7 +94,7 @@ quiet-period state, and pending batch jobs.
 **From the Gundi portal:** open the integration and run the **Sample Data** action.
 The summary appears in the action result and in the integration's activity log.
 
-**From the CLI** (needs `GUNDI_API_BASE_URL` and `KEYCLOAK_*` env vars so it can
+**From the CLI** (needs `GUNDI_API_BASE_URL` and the `GUNDI_OAUTH_*` env vars, or their older `KEYCLOAK_*` names, so it can
 look up the integration; GFW credentials come from the integration's auth config):
 
 ```bash

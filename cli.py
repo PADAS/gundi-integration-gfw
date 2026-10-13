@@ -327,7 +327,7 @@ def get_aoi_data(username, password, url):
 @click.option('--as-json', is_flag=True, default=False, help="Print the raw result as JSON instead of a report")
 def sample_integration(integration_id, days, sample_size, use_state, as_json):
     """
-    Needs Gundi API env vars (GUNDI_API_BASE_URL, KEYCLOAK_*) to look up the integration.
+    Needs Gundi API env vars (GUNDI_API_BASE_URL, GUNDI_OAUTH_* or the older KEYCLOAK_*) to look up the integration.
     GFW credentials come from the integration's own auth config.
     """
     from gundi_client_v2 import GundiClient
@@ -342,7 +342,7 @@ def sample_integration(integration_id, days, sample_size, use_state, as_json):
         except Exception as e:
             raise click.ClickException(
                 f"Could not load integration {integration_id} from Gundi "
-                f"(check GUNDI_API_BASE_URL / KEYCLOAK_* env vars): {type(e).__name__}: {e}"
+                f"(check GUNDI_API_BASE_URL / GUNDI_OAUTH_* env vars): {type(e).__name__}: {e}"
             )
         print(f"Integration: {integration.name} ({integration.id})")
         result = await sample_integration_data(
