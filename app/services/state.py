@@ -1,9 +1,27 @@
 import json
+import logging
 import stamina
-import httpx
 import redis.asyncio as redis
 from datetime import timedelta
 from app import settings
+from .activity_logger import ephemeral_run
+from .retry_policies import REDIS_RETRY
+
+logger = logging.getLogger(__name__)
+
+
+def _skip_on_ephemeral_run(op: str, integration_id: str, action_id: str) -> bool:
+    """Ephemeral runs get a fresh synthetic integration id and no TTL on state
+    keys, so any write would be a permanent orphan. Every mutating method
+    no-ops behind this, with a log line: a handler that writes then reads in
+    the same run sees {} and fails in a way that looks unrelated otherwise."""
+    if not ephemeral_run.get():
+        return False
+    logger.debug(
+        f"Skipping {op} for action '{action_id}' on ephemeral integration '{integration_id}': "
+        "state is not persisted on the ephemeral path."
+    )
+    return True
 
 
 class IntegrationStateManager:
@@ -15,14 +33,16 @@ class IntegrationStateManager:
         self.db_client = redis.Redis(host=host, port=port, db=db)
 
     async def get_state(self, integration_id: str, action_id: str, source_id: str = "no-source") -> dict:
-        for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
+        async for attempt in stamina.retry_context(**REDIS_RETRY):
             with attempt:
                 json_value = await self.db_client.get(f"integration_state.{integration_id}.{action_id}.{source_id}")
         value = json.loads(json_value) if json_value else {}
         return value
 
     async def set_state(self, integration_id: str, action_id: str, state: dict, source_id: str = "no-source"):
-        for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
+        if _skip_on_ephemeral_run("set_state", integration_id, action_id):
+            return
+        async for attempt in stamina.retry_context(**REDIS_RETRY):
             with attempt:
                 await self.db_client.set(
                     f"integration_state.{integration_id}.{action_id}.{source_id}",
@@ -37,9 +57,13 @@ class IntegrationStateManager:
         Returns True if the key was set by this call (i.e. the caller is the
         first within the TTL window), or False if it already existed. Useful
         for rate-limiting/throttling repeated events: the first caller in each
-        window gets True, the rest get False until the key expires.
+        window gets True, the rest get False until the key expires. On the
+        ephemeral path nothing is written and the answer is False, so a
+        throttling caller treats the window as already taken.
         """
-        for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
+        if _skip_on_ephemeral_run("set_if_absent", integration_id, action_id):
+            return False
+        async for attempt in stamina.retry_context(**REDIS_RETRY):
             with attempt:
                 was_set = await self.db_client.set(
                     f"integration_state.{integration_id}.{action_id}.{source_id}",
@@ -50,14 +74,18 @@ class IntegrationStateManager:
         return bool(was_set)
 
     async def delete_state(self, integration_id: str, action_id: str, source_id: str = "no-source"):
-        for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
+        if _skip_on_ephemeral_run("delete_state", integration_id, action_id):
+            return
+        async for attempt in stamina.retry_context(**REDIS_RETRY):
             with attempt:
                 await self.db_client.delete(
                     f"integration_state.{integration_id}.{action_id}.{source_id}"
                 )
 
     async def set_quiet_period(self, integration_id: str, action_id:str, quiet_period: int | timedelta):
-        for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
+        if _skip_on_ephemeral_run("set_quiet_period", integration_id, action_id):
+            return
+        async for attempt in stamina.retry_context(**REDIS_RETRY):
             with attempt:
                 if quiet_period: # handle both int and timedelta
                     await self.db_client.setex(
@@ -68,7 +96,7 @@ class IntegrationStateManager:
                     )
 
     async def is_quiet_period(self, integration_id: str, action_id: str):
-        for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
+        async for attempt in stamina.retry_context(**REDIS_RETRY):
             with attempt:
                 val = await self.db_client.exists(
                     f"integration_state.{integration_id}.{action_id}.quiet_period",
@@ -84,8 +112,10 @@ class IntegrationStateManager:
         
         This provides resilience if the GFW API is temporarily unavailable.
         """
+        if _skip_on_ephemeral_run("set_aoi_data", integration_id, "aoi_data"):
+            return
         ttl = ttl_seconds or self.DEFAULT_AOI_DATA_TTL_SECONDS
-        for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
+        async for attempt in stamina.retry_context(**REDIS_RETRY):
             with attempt:
                 await self.db_client.setex(
                     f"integration_state.{integration_id}.aoi_data",
@@ -99,7 +129,7 @@ class IntegrationStateManager:
         
         Returns None if no cached data exists.
         """
-        for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
+        async for attempt in stamina.retry_context(**REDIS_RETRY):
             with attempt:
                 data = await self.db_client.get(f"integration_state.{integration_id}.aoi_data")
         if data:
@@ -129,12 +159,14 @@ class IntegrationStateManager:
         job_id = job_data.get("job_id")
         if not job_id:
             raise ValueError("job_data must include a 'job_id' field")
+        if _skip_on_ephemeral_run("add_pending_job", integration_id, action_id):
+            return
         
         ttl = ttl_seconds or self.DEFAULT_JOB_TTL_SECONDS
         job_key = self._pending_job_key(integration_id, action_id, job_id)
         set_key = self._pending_jobs_set_key(integration_id, action_id)
         
-        for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
+        async for attempt in stamina.retry_context(**REDIS_RETRY):
             with attempt:
                 # Use a transactional pipeline so both operations succeed or fail together
                 pipe = self.db_client.pipeline(transaction=True)
@@ -161,7 +193,7 @@ class IntegrationStateManager:
         jobs = []
         expired_job_ids = []
         
-        for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
+        async for attempt in stamina.retry_context(**REDIS_RETRY):
             with attempt:
                 # Get all job IDs from the set
                 job_ids = await self.db_client.smembers(set_key)
@@ -174,7 +206,7 @@ class IntegrationStateManager:
             job_id_str = job_id.decode('utf8') if isinstance(job_id, bytes) else job_id
             job_key = self._pending_job_key(integration_id, action_id, job_id_str)
             
-            for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
+            async for attempt in stamina.retry_context(**REDIS_RETRY):
                 with attempt:
                     job_data = await self.db_client.get(job_key)
             
@@ -186,7 +218,7 @@ class IntegrationStateManager:
         
         # Clean up expired job IDs from the set
         if expired_job_ids:
-            for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
+            async for attempt in stamina.retry_context(**REDIS_RETRY):
                 with attempt:
                     await self.db_client.srem(set_key, *expired_job_ids)
         
@@ -198,10 +230,12 @@ class IntegrationStateManager:
         
         Deletes the job data key and removes the job ID from the tracking set.
         """
+        if _skip_on_ephemeral_run("remove_pending_job", integration_id, action_id):
+            return
         job_key = self._pending_job_key(integration_id, action_id, job_id)
         set_key = self._pending_jobs_set_key(integration_id, action_id)
-        
-        for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
+
+        async for attempt in stamina.retry_context(**REDIS_RETRY):
             with attempt:
                 pipeline = self.db_client.pipeline(transaction=True)
                 pipeline.delete(job_key)
