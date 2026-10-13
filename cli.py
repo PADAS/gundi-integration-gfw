@@ -318,6 +318,48 @@ def get_aoi_data(username, password, url):
         print(aoi_data.json(indent=2))
     asyncio.run(fn())
 
+@cli.command(help="Sample what GFW has for a Gundi integration vs. what its settings send on to EarthRanger")
+@click.argument('integration_id', type=str)
+@click.option('--days', type=int, default=None, help="Lookback days for both feeds (default: each feed's configured lookback)")
+@click.option('--sample-size', type=int, default=5, help="Example records to show per confidence level")
+@click.option('--use-state/--no-state', default=False,
+              help="Also read Redis state (AOI cache, quiet periods, pending jobs). Needs REDIS_HOST. Default: off")
+@click.option('--as-json', is_flag=True, default=False, help="Print the raw result as JSON instead of a report")
+def sample_integration(integration_id, days, sample_size, use_state, as_json):
+    """
+    Needs Gundi API env vars (GUNDI_API_BASE_URL, KEYCLOAK_*) to look up the integration.
+    GFW credentials come from the integration's own auth config.
+    """
+    from gundi_client_v2 import GundiClient
+    from app.actions.configurations import SampleDataConfig
+    from app.actions.handlers import sample_integration_data
+    from app.actions.utils import format_sample_report
+
+    async def fn():
+        try:
+            async with GundiClient() as gundi:
+                integration = await gundi.get_integration_details(integration_id)
+        except Exception as e:
+            raise click.ClickException(
+                f"Could not load integration {integration_id} from Gundi "
+                f"(check GUNDI_API_BASE_URL / KEYCLOAK_* env vars): {type(e).__name__}: {e}"
+            )
+        print(f"Integration: {integration.name} ({integration.id})")
+        result = await sample_integration_data(
+            integration,
+            SampleDataConfig(lookback_days=days, sample_size=sample_size),
+            use_state=use_state,
+        )
+        if as_json:
+            print(json.dumps(result, indent=2, default=str))
+        else:
+            print(format_sample_report(result))
+        if "error" in result:
+            raise SystemExit(1)
+
+    asyncio.run(fn())
+
+
 if __name__ == '__main__':
     cli()
 

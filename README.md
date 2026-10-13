@@ -76,8 +76,32 @@ Commands:
   get-datasets            Get Datasets
   gfw-integrated-alerts   Get GFW Integrated Alerts for the provided URL
   nasa-viirs-fire-alerts  Get NASA Viirs Fire Alerts for the provided URL
+  sample-integration      Sample what GFW has for a Gundi integration vs. what its settings send on to EarthRanger
 ```
 
 Each command has it's own arguments. Try running one to see what arguments it requires.
+
+### Diagnosing "I'm not seeing data"
+
+Most reports of missing data come down to the connection's confidence thresholds
+(defaults are the strictest: fire alerts `high`, integrated alerts `highest`), the
+lookback window, or the pipeline simply being in a quiet period. The `sample_data`
+diagnostic shows all of that in one place: it queries GFW for the AOI with **no**
+confidence filter and reports, per feed, how many alerts exist at each confidence
+level and how many the current settings let through, plus dataset freshness,
+quiet-period state, and pending batch jobs.
+
+**From the Gundi portal:** open the integration and run the **Sample Data** action.
+The summary appears in the action result and in the integration's activity log.
+
+**From the CLI** (needs `GUNDI_API_BASE_URL` and `KEYCLOAK_*` env vars so it can
+look up the integration; GFW credentials come from the integration's auth config):
+
+```bash
+python3 cli.py sample-integration <integration-uuid>
+python3 cli.py sample-integration <integration-uuid> --days 7 --sample-size 10
+python3 cli.py sample-integration <integration-uuid> --as-json
+python3 cli.py sample-integration <integration-uuid> --use-state   # also read Redis state; needs REDIS_HOST
+```
 
 

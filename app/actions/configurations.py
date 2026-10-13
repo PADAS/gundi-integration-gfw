@@ -1,8 +1,9 @@
 import pydantic
 
 from datetime import datetime
+from typing import Optional
 
-from app.actions.core import PullActionConfiguration, AuthActionConfiguration, ExecutableActionMixin, InternalActionConfiguration
+from app.actions.core import PullActionConfiguration, AuthActionConfiguration, ExecutableActionMixin, InternalActionConfiguration, GenericActionConfiguration
 from app.actions.gfwclient import AOIData, DatasetResponseItem, IntegratedAlertsConfidenceEnum, NasaViirsFireAlertConfidenceEnum
 from app.services.errors import ConfigurationNotFound
 from app.services.utils import find_config_for_action, FieldWithUIOptions, UIOptions, GlobalUISchemaOptions
@@ -199,3 +200,37 @@ class GetIntegratedAlertsForGeostoreID(InternalActionConfiguration):
     date_range: tuple[datetime, datetime]
     lowest_confidence: IntegratedAlertsConfidenceEnum
     dataset: DatasetResponseItem
+
+
+class SampleDataConfig(GenericActionConfiguration, ExecutableActionMixin):
+    """
+    Diagnostic action: query GFW for everything in the AOI (no confidence filter)
+    and report what exists vs. what this connection's settings would send on.
+    """
+    lookback_days: Optional[int] = pydantic.Field(
+        None,
+        ge=1,
+        le=30,
+        title="Lookback days (optional)",
+        description="Days to sample for both feeds. Leave empty to use each feed's configured lookback."
+    )
+    sample_size: int = pydantic.Field(
+        5,
+        ge=0,
+        le=25,
+        title="Sample records per confidence level",
+        description="How many example records to include for each confidence level."
+    )
+
+
+def get_pull_events_config(integration) -> Optional[PullEventsConfig]:
+    config = find_config_for_action(
+        configurations=integration.configurations,
+        action_id="pull_events"
+    )
+    if not config:
+        return None
+    try:
+        return PullEventsConfig.parse_obj(config.data)
+    except pydantic.ValidationError:
+        return None

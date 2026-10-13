@@ -6,7 +6,9 @@ import app.settings
 
 from app.actions.gfwclient import DataAPI, DatasetStatus, \
     AOIData, DATASET_GFW_INTEGRATED_ALERTS, DATASET_NASA_VIIRS_FIRE_ALERTS, DataAPIAuthException, \
-    JobResponse, IntegratedAlert, DownloadLinkExpiredException
+    JobResponse, IntegratedAlert, DownloadLinkExpiredException, \
+    IntegratedAlertsConfidenceEnum, IntegratedAlertsConfidenceEnumOrder, \
+    NasaViirsFireAlertConfidenceEnum, NasaViirsFireAlertConfidenceEnumOrder
 from datetime import timezone, timedelta, datetime
 
 from app.actions.configurations import (
@@ -16,8 +18,12 @@ from app.actions.configurations import (
     GetFireAlertsDatasetAndGeostoresConfig,
     GetIntegratedAlertsDatasetAndGeostoresConfig,
     GetNasaVIIRSFireAlertsForGeostoreID,
-    GetIntegratedAlertsForGeostoreID
+    GetIntegratedAlertsForGeostoreID,
+    SampleDataConfig,
+    get_pull_events_config,
 )
+from app.actions.utils import summarize_by_confidence, fire_alert_confidence, integrated_alert_confidence
+from app.services.errors import ConfigurationNotFound
 from app.services.action_scheduler import trigger_action
 from app.services.activity_logger import activity_logger, log_action_activity
 from app.services.action_scheduler import crontab_schedule
@@ -666,3 +672,189 @@ async def action_get_nasa_viirs_fire_alerts_for_geostore_and_date_range(
     return {"dataset": DATASET_NASA_VIIRS_FIRE_ALERTS, "response": dataset_status.dict(), "total_alerts": total_alerts}
 
 
+
+
+# --- Diagnostics: sample what GFW has vs. what this connection sends ----------
+
+async def _feed_pipeline_state(integration_id, dataapi, *, dataset, quiet_period_key, pending_jobs_action_id=None, use_state=True):
+    """Read the non-confidence reasons a feed may look empty: dataset freshness, quiet period, pending jobs."""
+    state = {}
+    errors = []
+    try:
+        metadata = await dataapi.get_dataset_metadata(dataset)
+        state["dataset_updated_on"] = metadata.updated_on.isoformat()
+    except Exception as e:
+        state["dataset_updated_on"] = None
+        errors.append(f"dataset metadata unavailable: {e}")
+    if not use_state:
+        if errors:
+            state["state_errors"] = errors
+        return state
+    try:
+        saved = await state_manager.get_state(integration_id, "pull_events", dataset)
+        state["last_processed_dataset_update"] = (
+            DatasetStatus.parse_obj(saved).latest_updated_on.isoformat() if saved else None
+        )
+        state["quiet_period_active"] = bool(await state_manager.is_quiet_period(integration_id, quiet_period_key))
+        if pending_jobs_action_id:
+            state["pending_jobs"] = len(await state_manager.get_pending_jobs(integration_id, pending_jobs_action_id))
+    except Exception as e:
+        errors.append(f"integration state unavailable: {e}")
+    if errors:
+        state["state_errors"] = errors
+    return state
+
+
+def _feed_message(label, feed):
+    if not feed.get("enabled", True):
+        return f"{label}: disabled"
+    if "error" in feed:
+        return f"{label}: query failed ({feed['error']})"
+    return (
+        f"{label}: {feed['available_total']} available in last {feed['lookback_days']} days, "
+        f"{feed['sent_total']} pass '{feed['lowest_confidence']}'"
+    )
+
+
+async def sample_integration_data(
+        integration: Integration,
+        action_config: SampleDataConfig,
+        dataapi: DataAPI = None,
+        use_state: bool = True,
+) -> dict:
+    """
+    Core of the sample_data diagnostic. Free of activity logging so the CLI can call it too.
+
+    :param use_state: read Redis-backed state (AOI cache, quiet periods, pending jobs).
+        Set False when running outside the service (e.g. the CLI) without Redis.
+    """
+    integration_id = str(integration.id)
+
+    pull_config = get_pull_events_config(integration)
+    if not pull_config:
+        return {"error": f"Integration {integration_id} has no valid 'pull_events' configuration to sample against."}
+
+    try:
+        auth_config = get_auth_config(integration)
+    except ConfigurationNotFound as e:
+        return {"error": str(e)}
+
+    dataapi = dataapi or DataAPI(username=auth_config.email, password=auth_config.password.get_secret_value())
+
+    # Resolve the AOI the same way pull_events does: cache first, then the share link.
+    aoi_data = None
+    if use_state:
+        try:
+            cached = await state_manager.get_aoi_data(integration_id)
+            if cached:
+                aoi_data = AOIData.parse_obj(cached)
+        except Exception as e:
+            logger.warning(f"Could not read cached AOI data for {integration_id}: {e}")
+    if not aoi_data:
+        try:
+            aoi_id = await dataapi.aoi_from_url(pull_config.gfw_share_link_url)
+            aoi_data = await dataapi.get_aoi(aoi_id=aoi_id)
+        except Exception as e:
+            return {"error": f"Failed to fetch AOI data for {pull_config.gfw_share_link_url}: {e}"}
+
+    geostore_id = aoi_data.attributes.geostore
+    if not geostore_id:
+        return {"error": f"No Geostore associated with AOI {aoi_data.id}.", "aoi_id": aoi_data.id}
+
+    # Match pull_events: whole days, ending at the next UTC midnight.
+    end_date = (datetime.now(tz=timezone.utc) + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    result = {
+        "aoi_id": aoi_data.id,
+        "aoi_name": aoi_data.attributes.name,
+        "geostore_id": geostore_id,
+        "sampled_at": datetime.now(tz=timezone.utc).isoformat(),
+    }
+
+    if pull_config.include_fire_alerts:
+        days = action_config.lookback_days or pull_config.fire_lookback_days
+        feed = {"enabled": True, "dataset": DATASET_NASA_VIIRS_FIRE_ALERTS, "lookback_days": days}
+        try:
+            alerts = []
+            for lower, upper in generate_date_pairs(end_date - timedelta(days=days), end_date, interval=7):
+                alerts.extend(await dataapi.get_nasa_viirs_fire_alerts(
+                    geostore_id=geostore_id,
+                    date_range=(lower, upper),
+                    lowest_confidence=NasaViirsFireAlertConfidenceEnum.low,  # everything
+                    semaphore=sema,
+                ))
+            feed.update(summarize_by_confidence(
+                alerts,
+                confidence_of=fire_alert_confidence,
+                confidence_order=NasaViirsFireAlertConfidenceEnumOrder,
+                lowest_confidence=pull_config.fire_alerts_lowest_confidence,
+                sample_size=action_config.sample_size,
+            ))
+        except Exception as e:
+            logger.exception(f"sample_data: fire alerts query failed for {integration_id}: {e}")
+            feed["error"] = str(e)
+        feed.update(await _feed_pipeline_state(
+            integration_id, dataapi,
+            dataset=DATASET_NASA_VIIRS_FIRE_ALERTS,
+            quiet_period_key="fire_alerts",
+            use_state=use_state,
+        ))
+        result["fire_alerts"] = feed
+    else:
+        result["fire_alerts"] = {"enabled": False}
+
+    if pull_config.include_integrated_alerts:
+        days = action_config.lookback_days or pull_config.integrated_alerts_lookback_days
+        feed = {"enabled": True, "dataset": DATASET_GFW_INTEGRATED_ALERTS, "lookback_days": days}
+        try:
+            alerts = []
+            for lower, upper in generate_date_pairs(end_date - timedelta(days=days), end_date, interval=10):
+                alerts.extend(await dataapi.get_gfw_integrated_alerts(
+                    geostore_id=geostore_id,
+                    date_range=(lower, upper),
+                    lowest_confidence=IntegratedAlertsConfidenceEnum.nominal,  # everything
+                    semaphore=sema,
+                ))
+            feed.update(summarize_by_confidence(
+                alerts,
+                confidence_of=integrated_alert_confidence,
+                confidence_order=IntegratedAlertsConfidenceEnumOrder,
+                lowest_confidence=pull_config.integrated_alerts_lowest_confidence,
+                sample_size=action_config.sample_size,
+            ))
+        except Exception as e:
+            logger.exception(f"sample_data: integrated alerts query failed for {integration_id}: {e}")
+            feed["error"] = str(e)
+        feed.update(await _feed_pipeline_state(
+            integration_id, dataapi,
+            dataset=DATASET_GFW_INTEGRATED_ALERTS,
+            quiet_period_key="integrated_alerts",
+            pending_jobs_action_id=action_get_gfw_integrated_alerts.__name__.replace("action_", ""),
+            use_state=use_state,
+        ))
+        result["integrated_alerts"] = feed
+    else:
+        result["integrated_alerts"] = {"enabled": False}
+
+    result["message"] = ". ".join([
+        _feed_message("Fire alerts", result["fire_alerts"]),
+        _feed_message("Integrated alerts", result["integrated_alerts"]),
+    ]) + "."
+    return result
+
+
+@activity_logger()
+async def action_sample_data(integration: Integration, action_config: SampleDataConfig):
+    """
+    Diagnostic: show what GFW has in this connection's AOI and which records the
+    current settings let through. Run it from the portal when a user reports missing data.
+    """
+    result = await sample_integration_data(integration, action_config)
+    await log_action_activity(
+        integration_id=integration.id,
+        action_id=action_sample_data.__name__.replace("action_", ""),
+        level=LogLevel.ERROR if "error" in result else LogLevel.INFO,
+        title=result.get("message") or result["error"],
+        data=result,
+    )
+    return result
