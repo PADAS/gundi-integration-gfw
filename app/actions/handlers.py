@@ -24,6 +24,7 @@ from app.services.action_scheduler import crontab_schedule
 from app.services.gundi import send_events_to_gundi
 from app.services.state import IntegrationStateManager
 
+from gundi_client_v2.errors import AuthenticationError, GundiAPIError
 from gundi_core.schemas.v2 import Integration, LogLevel
 from pydantic import ValidationError
 
@@ -48,7 +49,11 @@ async def handle_transformed_data(transformed_data, integration_id, action_id):
             events=transformed_data,
             integration_id=integration_id
         )
-    except httpx.HTTPError as e:
+    except (httpx.HTTPError, GundiAPIError) as e:
+        # gundi-client-v2 3.x raises GundiAPIError (not an httpx error) for 4xx/5xx
+        # responses; transport failures still surface as httpx errors. Our own
+        # Gundi OAuth failures (AuthenticationError) are deliberately not caught:
+        # they are not Sensors API errors, and the runner classifies them.
         msg = f'Sensors API returned error for integration_id: {integration_id}. Exception: {e}'
         logger.exception(
             msg,
@@ -94,14 +99,15 @@ def transform_integrated_alert(alert):
 
 
 async def action_auth(integration, action_config: AuthenticateConfig):
-    logger.info(f"Executing auth action with integration {integration} and action_config {action_config}...")
+    # Log ids only: Integration.configurations[].data is a plain dict that carries the GFW password.
+    logger.info(f"Executing auth action for integration {integration.id} ({integration.name})...")
     try:
         dataapi = DataAPI(username=action_config.email, password=action_config.password.get_secret_value())
         token = await dataapi.get_access_token()
     except DataAPIAuthException as e:
         return {"valid_credentials": False, "message": f"Failed to authenticate with Global Forest Watch Data API: {e}"}
     else:
-        logger.info(f"Authenticated with success. token: {token}")
+        logger.info("Authenticated with Global Forest Watch Data API successfully.")
     
     return {"valid_credentials": token is not None}
 
@@ -111,7 +117,8 @@ async def action_auth(integration, action_config: AuthenticateConfig):
 async def action_pull_events(integration: Integration, action_config: PullEventsConfig):
     result = {}
 
-    logger.info(f"Executing 'pull_events' action with integration {integration} and action_config {action_config}")
+    # Log ids only: Integration.configurations[].data is a plain dict that carries the GFW password.
+    logger.info(f"Executing 'pull_events' action for integration {integration.id} ({integration.name}) with action_config {action_config}")
 
     auth_config = get_auth_config(integration)
 
@@ -405,25 +412,45 @@ async def action_get_gfw_integrated_alerts(integration: Integration, action_conf
                         integrated_alerts = [IntegratedAlert.parse_obj(alert) for alert in alerts_data]
                         transformed_data = [transform_integrated_alert(alert) for alert in integrated_alerts]
                         
-                        await handle_transformed_data(
+                        send_result = await handle_transformed_data(
                             transformed_data,
                             str(integration.id),
                             action_id
                         )
+                        if isinstance(send_result, dict) and "error" in send_result:
+                            # Keep the job pending so the next poll re-downloads and
+                            # re-sends it (bounded by the pending-job TTL); removing it
+                            # here would drop this batch of alerts for good.
+                            result["jobs_pending"] += 1
+                            logger.warning(
+                                f"Send to Gundi failed for job {job_id}; leaving it pending for retry",
+                                extra={"integration_id": str(integration.id), "job_id": job_id},
+                            )
+                            # Remember why, so that if the download link expires before a
+                            # retry succeeds the final failure names the Gundi error.
+                            await state_manager.add_pending_job(
+                                str(integration.id), action_id,
+                                {**job_data, "last_send_error": send_result["error"]},
+                            )
+                            continue
                         result["total_alerts_processed"] += len(integrated_alerts)
                         logger.info(f"Processed {len(integrated_alerts)} integrated alerts from job {job_id}")
-                    
+
                     result["jobs_completed"] += 1
                     await state_manager.remove_pending_job(str(integration.id), action_id, job_id)
                     
                 except DownloadLinkExpiredException as e:
+                    last_send_error = job_data.get("last_send_error")
                     msg = f"Batch job {job_id} download link expired"
+                    if last_send_error:
+                        msg += f" after a failed send to Gundi: {last_send_error}"
                     logger.error(
                         msg,
                         extra={
                             "integration_id": str(integration.id),
                             "job_id": job_id,
-                            "error": str(e)
+                            "error": str(e),
+                            "last_send_error": last_send_error,
                         }
                     )
                     await log_action_activity(
@@ -431,7 +458,7 @@ async def action_get_gfw_integrated_alerts(integration: Integration, action_conf
                         action_id=action_id,
                         level=LogLevel.ERROR,
                         title=msg,
-                        data={"job_id": job_id, "error": str(e)}
+                        data={"job_id": job_id, "error": str(e), "last_send_error": last_send_error}
                     )
                     result["jobs_failed"] += 1
                     await state_manager.remove_pending_job(str(integration.id), action_id, job_id)
@@ -464,6 +491,9 @@ async def action_get_gfw_integrated_alerts(integration: Integration, action_conf
                 else:
                     logger.info(f"Job {job_id} still pending with progress: {job_status.progress}")
                 
+        except AuthenticationError:
+            # Our own Gundi OAuth failure: not a per-job problem. Let the runner classify it.
+            raise
         except Exception as e:
             logger.exception(f"Error polling job {job_id}: {e}")
 
