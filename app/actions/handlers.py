@@ -24,6 +24,7 @@ from app.services.action_scheduler import crontab_schedule
 from app.services.gundi import send_events_to_gundi
 from app.services.state import IntegrationStateManager
 
+from gundi_client_v2.errors import GundiClientError
 from gundi_core.schemas.v2 import Integration, LogLevel
 from pydantic import ValidationError
 
@@ -48,7 +49,9 @@ async def handle_transformed_data(transformed_data, integration_id, action_id):
             events=transformed_data,
             integration_id=integration_id
         )
-    except httpx.HTTPError as e:
+    except (httpx.HTTPError, GundiClientError) as e:
+        # gundi-client-v2 3.x raises GundiAPIError (a GundiClientError, not an
+        # httpx error) for 4xx/5xx responses; transport failures still surface as httpx errors.
         msg = f'Sensors API returned error for integration_id: {integration_id}. Exception: {e}'
         logger.exception(
             msg,
@@ -101,7 +104,7 @@ async def action_auth(integration, action_config: AuthenticateConfig):
     except DataAPIAuthException as e:
         return {"valid_credentials": False, "message": f"Failed to authenticate with Global Forest Watch Data API: {e}"}
     else:
-        logger.info(f"Authenticated with success. token: {token}")
+        logger.info("Authenticated with Global Forest Watch Data API successfully.")
     
     return {"valid_credentials": token is not None}
 

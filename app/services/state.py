@@ -83,7 +83,7 @@ class IntegrationStateManager:
                 )
 
     async def set_quiet_period(self, integration_id: str, action_id:str, quiet_period: int | timedelta):
-        for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
+        async for attempt in stamina.retry_context(**REDIS_RETRY):
             with attempt:
                 if quiet_period: # handle both int and timedelta
                     await self.db_client.setex(
@@ -94,7 +94,7 @@ class IntegrationStateManager:
                     )
 
     async def is_quiet_period(self, integration_id: str, action_id: str):
-        for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
+        async for attempt in stamina.retry_context(**REDIS_RETRY):
             with attempt:
                 val = await self.db_client.exists(
                     f"integration_state.{integration_id}.{action_id}.quiet_period",
@@ -111,7 +111,7 @@ class IntegrationStateManager:
         This provides resilience if the GFW API is temporarily unavailable.
         """
         ttl = ttl_seconds or self.DEFAULT_AOI_DATA_TTL_SECONDS
-        for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
+        async for attempt in stamina.retry_context(**REDIS_RETRY):
             with attempt:
                 await self.db_client.setex(
                     f"integration_state.{integration_id}.aoi_data",
@@ -125,7 +125,7 @@ class IntegrationStateManager:
         
         Returns None if no cached data exists.
         """
-        for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
+        async for attempt in stamina.retry_context(**REDIS_RETRY):
             with attempt:
                 data = await self.db_client.get(f"integration_state.{integration_id}.aoi_data")
         if data:
@@ -160,7 +160,7 @@ class IntegrationStateManager:
         job_key = self._pending_job_key(integration_id, action_id, job_id)
         set_key = self._pending_jobs_set_key(integration_id, action_id)
         
-        for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
+        async for attempt in stamina.retry_context(**REDIS_RETRY):
             with attempt:
                 # Use a transactional pipeline so both operations succeed or fail together
                 pipe = self.db_client.pipeline(transaction=True)
@@ -187,7 +187,7 @@ class IntegrationStateManager:
         jobs = []
         expired_job_ids = []
         
-        for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
+        async for attempt in stamina.retry_context(**REDIS_RETRY):
             with attempt:
                 # Get all job IDs from the set
                 job_ids = await self.db_client.smembers(set_key)
@@ -200,7 +200,7 @@ class IntegrationStateManager:
             job_id_str = job_id.decode('utf8') if isinstance(job_id, bytes) else job_id
             job_key = self._pending_job_key(integration_id, action_id, job_id_str)
             
-            for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
+            async for attempt in stamina.retry_context(**REDIS_RETRY):
                 with attempt:
                     job_data = await self.db_client.get(job_key)
             
@@ -212,7 +212,7 @@ class IntegrationStateManager:
         
         # Clean up expired job IDs from the set
         if expired_job_ids:
-            for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
+            async for attempt in stamina.retry_context(**REDIS_RETRY):
                 with attempt:
                     await self.db_client.srem(set_key, *expired_job_ids)
         
@@ -227,7 +227,7 @@ class IntegrationStateManager:
         job_key = self._pending_job_key(integration_id, action_id, job_id)
         set_key = self._pending_jobs_set_key(integration_id, action_id)
         
-        for attempt in stamina.retry_context(on=redis.RedisError, attempts=5, wait_initial=1.0, wait_max=30, wait_jitter=3.0):
+        async for attempt in stamina.retry_context(**REDIS_RETRY):
             with attempt:
                 pipeline = self.db_client.pipeline(transaction=True)
                 pipeline.delete(job_key)

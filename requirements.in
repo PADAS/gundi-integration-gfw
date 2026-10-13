@@ -1,2 +1,5 @@
 shapely~=1.8.0
 backoff~=2.2.1
+# test-only, but declared here rather than in the template-owned requirements-dev.in:
+# imported by app/actions/tests/test_gfwclient.py; 0.22 is the first line that supports httpx 0.28
+respx~=0.22.0
