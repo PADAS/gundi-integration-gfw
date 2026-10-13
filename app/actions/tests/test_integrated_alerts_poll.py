@@ -104,3 +104,48 @@ async def test_job_stays_pending_when_the_send_to_gundi_fails(gfw_integration, a
     assert result["jobs_completed"] == 0
     assert result["total_alerts_processed"] == 0
     assert result["jobs_pending"] == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_send_is_recorded_on_the_pending_job(gfw_integration, action_config, mock_dataapi, mock_state, mock_activity_log, mocker):
+    mocker.patch("app.actions.handlers.handle_transformed_data", AsyncMock(return_value={"error": "Sensors API returned error: HTTP 400"}))
+
+    await action_get_gfw_integrated_alerts(integration=gfw_integration, action_config=action_config)
+
+    mock_state.add_pending_job.assert_awaited_once()
+    _, action_id, job_data = mock_state.add_pending_job.call_args.args
+    assert action_id == "get_gfw_integrated_alerts"
+    assert job_data["job_id"] == "job-1"
+    assert job_data["last_send_error"] == "Sensors API returned error: HTTP 400"
+
+
+@pytest.mark.asyncio
+async def test_expired_download_link_reports_the_last_send_error(gfw_integration, action_config, mock_dataapi, mock_state, mock_activity_log, mocker):
+    from app.actions.gfwclient import DownloadLinkExpiredException
+
+    mock_state.get_pending_jobs = AsyncMock(return_value=[{
+        "job_id": "job-1", "job_link": "https://gfw.example/job/job-1",
+        "last_send_error": "Sensors API returned error: HTTP 400",
+    }])
+    mock_dataapi.download_job_results = AsyncMock(side_effect=DownloadLinkExpiredException("expired"))
+
+    result = await action_get_gfw_integrated_alerts(integration=gfw_integration, action_config=action_config)
+
+    assert result["jobs_failed"] == 1
+    expired_log = next(c for c in mock_activity_log.call_args_list if "expired" in c.kwargs["title"])
+    assert expired_log.kwargs["data"]["last_send_error"] == "Sensors API returned error: HTTP 400"
+    assert "HTTP 400" in expired_log.kwargs["title"]
+
+
+@pytest.mark.asyncio
+async def test_our_own_gundi_auth_failure_is_not_swallowed_by_the_poll_loop(gfw_integration, action_config, mock_dataapi, mock_state, mock_activity_log, mocker):
+    from gundi_client_v2.errors import AuthenticationError
+
+    mocker.patch(
+        "app.actions.handlers.handle_transformed_data",
+        AsyncMock(side_effect=AuthenticationError("invalid_client", status_code=401)),
+    )
+
+    with pytest.raises(AuthenticationError):
+        await action_get_gfw_integrated_alerts(integration=gfw_integration, action_config=action_config)
+    mock_state.remove_pending_job.assert_not_called()
