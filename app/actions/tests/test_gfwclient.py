@@ -293,6 +293,54 @@ async def test_fetch_integrated_alerts_backs_off_2_times_then_succeed(
     assert len(alerts) == len(f_get_alerts_response['data'])
 
 
+@pytest.fixture
+def f_dataset_metadata_response():
+    return {
+        "data": {
+            "created_on": "2024-01-01T00:00:00",
+            "updated_on": "2026-10-16T12:00:00",
+            "dataset": "gfw_integrated_alerts",
+            "version": "v20261016",
+            "is_latest": True,
+            "is_mutable": False,
+        }
+    }
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_dataset_metadata_raises_after_retrying_non_2xx(
+        f_api_keys_response, f_auth_token_response, fast_backoff
+):
+    respx.post(f"{DataAPI.DATA_API_URL}/auth/token").respond(status_code=200, json=f_auth_token_response)
+    respx.get(f"{DataAPI.DATA_API_URL}/auth/apikeys").respond(status_code=200, json=f_api_keys_response)
+    metadata_route = respx.get(f"{DataAPI.DATA_API_URL}/dataset/gfw_integrated_alerts/latest").respond(status_code=503)
+
+    client = DataAPI(username="test@example.com", password="test_password")
+    with pytest.raises(httpx.HTTPStatusError) as excinfo:
+        await client.get_dataset_metadata("gfw_integrated_alerts")
+
+    assert metadata_route.call_count == 3
+    assert excinfo.value.response.status_code == 503
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_dataset_metadata_retries_non_2xx_then_succeeds(
+        f_api_keys_response, f_auth_token_response, f_dataset_metadata_response, fast_backoff
+):
+    respx.post(f"{DataAPI.DATA_API_URL}/auth/token").respond(status_code=200, json=f_auth_token_response)
+    respx.get(f"{DataAPI.DATA_API_URL}/auth/apikeys").respond(status_code=200, json=f_api_keys_response)
+    respx.get(f"{DataAPI.DATA_API_URL}/dataset/gfw_integrated_alerts/latest").mock(
+        side_effect=[httpx.Response(429), httpx.Response(200, json=f_dataset_metadata_response)]
+    )
+
+    client = DataAPI(username="test@example.com", password="test_password")
+    metadata = await client.get_dataset_metadata("gfw_integrated_alerts")
+
+    assert metadata.version == "v20261016"
+    assert metadata.updated_on == datetime(2026, 10, 16, 12, 0, tzinfo=timezone.utc)
+
 
 @pytest.mark.asyncio
 async def test_aoi_from_url_parses_globalforestwatch_url_directly():

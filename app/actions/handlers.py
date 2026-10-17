@@ -711,7 +711,7 @@ async def _feed_pipeline_state(integration_id, dataapi, *, dataset, quiet_period
     state = {}
     errors = []
     try:
-        metadata = await dataapi.get_dataset_metadata(dataset)  # None on a non-2xx response
+        metadata = await dataapi.get_dataset_metadata(dataset)
         if metadata is None:
             raise ValueError(f"GFW returned no metadata for dataset '{dataset}'")
         state["dataset_updated_on"] = metadata.updated_on.isoformat()

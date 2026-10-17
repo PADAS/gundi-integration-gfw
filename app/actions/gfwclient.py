@@ -866,7 +866,7 @@ class DataAPI:
         
 
     @backoff.on_exception(backoff.expo, (httpx.TimeoutException, httpx.HTTPStatusError), max_tries=3, factor=3)
-    async def get_dataset_metadata(self, dataset: str = "", version: str = "latest"):
+    async def get_dataset_metadata(self, dataset: str = "", version: str = "latest") -> DatasetResponseItem:
 
         api_key = await self.get_a_valid_api_key()
         headers = {"x-api-key": api_key.api_key}
@@ -877,10 +877,8 @@ class DataAPI:
                 headers=headers,
                 follow_redirects=True
             )
-
-            if httpx.codes.is_success(response.status_code):
-                data = response.json()
-                return DatasetResponseItem.parse_obj(data.get("data"))
+            response.raise_for_status()
+            return DatasetResponseItem.parse_obj(response.json().get("data"))
 
 
     @backoff.on_exception(backoff.constant, httpx.HTTPError, max_tries=3, interval=10)
