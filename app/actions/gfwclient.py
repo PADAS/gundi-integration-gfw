@@ -350,8 +350,8 @@ class IntegratedAlertsConfidenceEnum(str, Enum):
 IntegratedAlertsConfidenceEnumOrder = [IntegratedAlertsConfidenceEnum.nominal, IntegratedAlertsConfidenceEnum.high, IntegratedAlertsConfidenceEnum.highest]
 
 class NasaViirsFireAlertConfidenceEnum(str, Enum):
-    nominal = 'nominal'
     low = 'low'
+    nominal = 'nominal'
     high = 'high'
 
 NasaViirsFireAlertConfidenceEnumOrder = [NasaViirsFireAlertConfidenceEnum.low, NasaViirsFireAlertConfidenceEnum.nominal, NasaViirsFireAlertConfidenceEnum.high]

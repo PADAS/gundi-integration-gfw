@@ -4,7 +4,8 @@ from datetime import datetime
 from typing import Optional
 
 from app.actions.core import PullActionConfiguration, AuthActionConfiguration, ExecutableActionMixin, InternalActionConfiguration, GenericActionConfiguration
-from app.actions.gfwclient import AOIData, DatasetResponseItem, IntegratedAlertsConfidenceEnum, NasaViirsFireAlertConfidenceEnum
+from app.actions.gfwclient import AOIData, DatasetResponseItem, IntegratedAlertsConfidenceEnum, IntegratedAlertsConfidenceEnumOrder, \
+    NasaViirsFireAlertConfidenceEnum, NasaViirsFireAlertConfidenceEnumOrder
 from app.services.errors import ConfigurationNotFound, ConfigurationValidationError
 from app.services.utils import find_config_for_action, FieldWithUIOptions, UIOptions, GlobalUISchemaOptions
 
@@ -28,6 +29,35 @@ def get_auth_config(integration):
             f"are missing. Please fix the integration setup in the portal."
         )
     return AuthenticateConfig.parse_obj(auth_config.data)
+
+
+# What each confidence level means, shown under the option in the portal dropdown.
+# Fire levels follow NASA FIRMS' VIIRS 375m confidence classes; integrated levels
+# follow GFW's integrated deforestation alerts (GLAD-L, GLAD-S2, RADD).
+FIRE_ALERT_CONFIDENCE_DESCRIPTIONS = {
+    NasaViirsFireAlertConfidenceEnum.low: "Daytime detections with sun glint or a weak temperature anomaly. Most likely to be false positives.",
+    NasaViirsFireAlertConfidenceEnum.nominal: "No sun glint and a strong temperature anomaly, day or night.",
+    NasaViirsFireAlertConfidenceEnum.high: "Saturated pixels, day or night. The most certain detections.",
+}
+
+INTEGRATED_ALERT_CONFIDENCE_DESCRIPTIONS = {
+    IntegratedAlertsConfidenceEnum.nominal: "Detected once by a single alert system.",
+    IntegratedAlertsConfidenceEnum.high: "Detected more than once by a single alert system.",
+    IntegratedAlertsConfidenceEnum.highest: "Detected by more than one alert system.",
+}
+
+
+def described_choices(definition: dict, order: list, descriptions: dict) -> dict:
+    """
+    Rewrite an enum definition as oneOf [{const, title, description}] in rank order,
+    so the portal dropdown lists the levels lowest-first with a description under each.
+    Stored values are unchanged: each const is the enum value.
+    """
+    choices = [
+        {"const": level.value, "title": level.value.capitalize(), "description": descriptions[level]}
+        for level in order
+    ]
+    return {key: value for key, value in definition.items() if key != "enum"} | {"oneOf": choices}
 
 
 class PullEventsConfig(PullActionConfiguration):
@@ -104,6 +134,20 @@ class PullEventsConfig(PullActionConfiguration):
             "*",
         ],
     )
+
+    @classmethod
+    def schema(cls, **kwargs):
+        # Present each confidence enum as described choices. Done here rather than
+        # in schema_extra, which pydantic runs before it attaches "definitions".
+        json_schema_dict = super().schema(**kwargs)
+        definitions = json_schema_dict.get("definitions", {})
+        for name, order, descriptions in (
+            ("NasaViirsFireAlertConfidenceEnum", NasaViirsFireAlertConfidenceEnumOrder, FIRE_ALERT_CONFIDENCE_DESCRIPTIONS),
+            ("IntegratedAlertsConfidenceEnum", IntegratedAlertsConfidenceEnumOrder, INTEGRATED_ALERT_CONFIDENCE_DESCRIPTIONS),
+        ):
+            if name in definitions:
+                definitions[name] = described_choices(definitions[name], order, descriptions)
+        return json_schema_dict
 
     class Config:
         @staticmethod
