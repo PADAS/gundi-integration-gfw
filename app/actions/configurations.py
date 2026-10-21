@@ -14,7 +14,7 @@ class AuthenticateConfig(AuthActionConfiguration, ExecutableActionMixin):
     email: str
     password: pydantic.SecretStr = pydantic.Field(..., format="password", 
                                                   title="Password",
-                                                  description="Password for the Global Forest Watch account.")
+                                                  description="Password for the Global Nature Watch account.")
 
 
 def get_auth_config(integration):
@@ -64,13 +64,13 @@ class PullEventsConfig(PullActionConfiguration):
 
     gfw_share_link_url: pydantic.HttpUrl = pydantic.Field(
         ...,
-        title="Global Forest Watch AOI Share Link",
-        description="AOI share link from your MyGFW dashboard."
+        title="Global Nature Watch AOI Share Link",
+        description="AOI share link from your Global Nature Watch dashboard."
     )
     include_fire_alerts: bool = pydantic.Field(
         True,
         title="Include fire alerts",
-        description="Fetch fire alerts from Global Forest Watch and include them in this connection."
+        description="Fetch fire alerts from Global Nature Watch and include them in this connection."
     )
 
     fire_alerts_lowest_confidence: NasaViirsFireAlertConfidenceEnum = pydantic.Field(
@@ -82,7 +82,7 @@ class PullEventsConfig(PullActionConfiguration):
     include_integrated_alerts: bool = pydantic.Field(
         True,
         title="Include integrated deforestation alerts",
-        description="Fetch integrated deforestation alerts from Global Forest Watch and include them in the connection."
+        description="Fetch integrated deforestation alerts from Global Nature Watch and include them in the connection."
     )
 
     integrated_alerts_lowest_confidence: IntegratedAlertsConfidenceEnum = pydantic.Field(

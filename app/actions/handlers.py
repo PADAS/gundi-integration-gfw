@@ -76,7 +76,7 @@ async def handle_transformed_data(transformed_data, integration_id, action_id):
 
 def transform_fire_alert(alert):
     event_time = alert.alert_date.replace(tzinfo=timezone.utc).isoformat()
-    title = "GFW VIIRS Alert"
+    title = "GNW VIIRS Alert"
 
     return dict(
         title=title,
@@ -91,7 +91,7 @@ def transform_fire_alert(alert):
 
 
 def transform_integrated_alert(alert):
-    title = ("GFW Integrated Deforestation Alert")
+    title = ("GNW Integrated Deforestation Alert")
 
     return dict(
         title=title,
@@ -111,9 +111,9 @@ async def action_auth(integration, action_config: AuthenticateConfig):
         dataapi = DataAPI(username=action_config.email, password=action_config.password.get_secret_value())
         token = await dataapi.get_access_token()
     except DataAPIAuthException as e:
-        return {"valid_credentials": False, "message": f"Failed to authenticate with Global Forest Watch Data API: {e}"}
+        return {"valid_credentials": False, "message": f"Failed to authenticate with Global Nature Watch Data API: {e}"}
     else:
-        logger.info("Authenticated with Global Forest Watch Data API successfully.")
+        logger.info("Authenticated with Global Nature Watch Data API successfully.")
     
     return {"valid_credentials": token is not None}
 
@@ -713,7 +713,7 @@ async def _feed_pipeline_state(integration_id, dataapi, *, dataset, quiet_period
     try:
         metadata = await dataapi.get_dataset_metadata(dataset)
         if metadata is None:
-            raise ValueError(f"GFW returned no metadata for dataset '{dataset}'")
+            raise ValueError(f"GNW returned no metadata for dataset '{dataset}'")
         state["dataset_updated_on"] = metadata.updated_on.isoformat()
     except Exception as e:
         state["dataset_updated_on"] = None
@@ -831,7 +831,7 @@ async def sample_integration_data(
     try:
         await dataapi.get_a_valid_api_key()
     except Exception as e:
-        return {"error": f"Could not authenticate with Global Forest Watch Data API: {e}", "aoi_id": aoi_data.id}
+        return {"error": f"Could not authenticate with Global Nature Watch Data API: {e}", "aoi_id": aoi_data.id}
 
     # Match pull_events: whole days, ending at the next UTC midnight.
     end_date = (datetime.now(tz=timezone.utc) + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)

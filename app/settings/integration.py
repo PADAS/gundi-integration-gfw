@@ -8,4 +8,4 @@ env.read_env()
 GFW_DATASET_QUERY_CONCURRENCY = env.int("GFW_DATASET_QUERY_CONCURRENCY", 5)
 
 # Display name registered in Gundi (overrides the name derived from the type slug)
-INTEGRATION_TYPE_NAME = env.str("INTEGRATION_TYPE_NAME", "Global Forest Watch")
+INTEGRATION_TYPE_NAME = env.str("INTEGRATION_TYPE_NAME", "Global Nature Watch")
