@@ -792,7 +792,7 @@ def test_gfw_integration_type_name_setting_default():
     # the template's test_register_integration_with_type_name_setting proves
     # that setting flows into the registration payload.
     import app.settings.integration as integration_settings
-    assert integration_settings.INTEGRATION_TYPE_NAME == "Global Forest Watch"
+    assert integration_settings.INTEGRATION_TYPE_NAME == "Global Nature Watch"
 
 
 def test_action_type_enum_has_reference():
