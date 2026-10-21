@@ -252,7 +252,7 @@ class GetIntegratedAlertsForGeostoreID(InternalActionConfiguration):
 
 class SampleDataConfig(GenericActionConfiguration, ExecutableActionMixin):
     """
-    Diagnostic action: query GFW for everything in the AOI (no confidence filter)
+    Diagnostic action: query GNW for everything in the AOI (no confidence filter)
     and report what exists vs. what this connection's settings would send on.
     """
     lookback_days: Optional[int] = pydantic.Field(

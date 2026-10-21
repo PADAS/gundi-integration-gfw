@@ -903,7 +903,7 @@ async def sample_integration_data(
 @activity_logger(on_completion=False)  # the entry below is the completion record
 async def action_sample_data(integration: Integration, action_config: SampleDataConfig):
     """
-    Diagnostic: show what GFW has in this connection's AOI and which records the
+    Diagnostic: show what GNW has in this connection's AOI and which records the
     current settings let through. Run it from the portal when a user reports missing data.
     """
     result = await sample_integration_data(integration, action_config)
