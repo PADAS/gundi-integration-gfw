@@ -108,8 +108,10 @@ async def action_auth(integration, action_config: AuthenticateConfig):
     # Log ids only: Integration.configurations[].data is a plain dict that carries the GFW password.
     logger.info(f"Executing auth action for integration {integration.id} ({integration.name})...")
     try:
-        dataapi = DataAPI(username=action_config.email, password=action_config.password.get_secret_value())
+        dataapi = DataAPI(**action_config.data_api_credentials())
         token = await dataapi.get_access_token()
+    except ConfigurationNotFound as e:
+        return {"valid_credentials": False, "message": str(e)}
     except DataAPIAuthException as e:
         return {"valid_credentials": False, "message": f"Failed to authenticate with Global Nature Watch Data API: {e}"}
     else:
@@ -129,7 +131,7 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
     auth_config = get_auth_config(integration)
 
     # Get AOI data from API, with fallback to cached data
-    dataapi = DataAPI(username=auth_config.email, password=auth_config.password.get_secret_value())
+    dataapi = DataAPI(**auth_config.data_api_credentials())
     aoi_data = None
 
     # Prefer cached AOI data, fall back to API if not available
@@ -247,8 +249,7 @@ def generate_date_pairs(lower_date, upper_date, interval=10):
 async def action_get_nasa_viirs_fire_alerts(integration: Integration, action_config: GetFireAlertsDatasetAndGeostoresConfig):
     auth_config = get_auth_config(integration)
     dataapi = DataAPI(
-        username=auth_config.email,
-        password=auth_config.password.get_secret_value()
+        **auth_config.data_api_credentials()
     )
 
     fire_dataset_metadata = None
@@ -293,7 +294,7 @@ async def action_get_nasa_viirs_fire_alerts(integration: Integration, action_con
             msg,
             extra={
                 "integration_id": str(integration.id),
-                "integration_login": auth_config.email,
+                "integration_login": auth_config.login,
                 "dataset_updated_on": fire_dataset_metadata.updated_on.isoformat(),
             },
         )
@@ -361,8 +362,7 @@ async def action_get_nasa_viirs_fire_alerts(integration: Integration, action_con
 async def action_get_gfw_integrated_alerts(integration: Integration, action_config: GetIntegratedAlertsDatasetAndGeostoresConfig):
     auth_config = get_auth_config(integration)
     dataapi = DataAPI(
-        username=auth_config.email,
-        password=auth_config.password.get_secret_value()
+        **auth_config.data_api_credentials()
     )
 
     result = {
@@ -545,7 +545,7 @@ async def action_get_gfw_integrated_alerts(integration: Integration, action_conf
             msg,
             extra={
                 "integration_id": str(integration.id),
-                "integration_login": auth_config.email,
+                "integration_login": auth_config.login,
                 "dataset_updated_on": integrated_dataset_metadata.updated_on.isoformat(),
             },
         )
@@ -637,8 +637,7 @@ async def action_get_gfw_integrated_alerts_for_date_range(
     total_alerts = 0
     auth_config = get_auth_config(integration)
     dataapi = DataAPI(
-        username=auth_config.email,
-        password=auth_config.password.get_secret_value()
+        **auth_config.data_api_credentials()
     )
 
     integrated_alerts = await dataapi.get_gfw_integrated_alerts(
@@ -673,8 +672,7 @@ async def action_get_nasa_viirs_fire_alerts_for_geostore_and_date_range(
     total_alerts = 0
     auth_config = get_auth_config(integration)
     dataapi = DataAPI(
-        username=auth_config.email,
-        password=auth_config.password.get_secret_value()
+        **auth_config.data_api_credentials()
     )
     fire_alerts = await dataapi.get_nasa_viirs_fire_alerts(
         geostore_id=action_config.geostore_id,
@@ -804,7 +802,10 @@ async def sample_integration_data(
     except (ConfigurationNotFound, ConfigurationValidationError) as e:
         return {"error": str(e)}
 
-    dataapi = dataapi or DataAPI(username=auth_config.email, password=auth_config.password.get_secret_value())
+    try:
+        dataapi = dataapi or DataAPI(**auth_config.data_api_credentials())
+    except ConfigurationNotFound as e:
+        return {"error": str(e)}
 
     # Resolve the AOI the same way pull_events does: cache first, then the share link.
     aoi_data = None

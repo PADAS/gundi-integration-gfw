@@ -1,5 +1,7 @@
 import pydantic
 
+from app import settings
+
 from datetime import datetime
 from typing import Optional
 
@@ -11,10 +13,84 @@ from app.services.utils import find_config_for_action, FieldWithUIOptions, UIOpt
 
 
 class AuthenticateConfig(AuthActionConfiguration, ExecutableActionMixin):
-    email: str
-    password: pydantic.SecretStr = pydantic.Field(..., format="password", 
-                                                  title="Password",
-                                                  description="Password for the Global Nature Watch account.")
+    use_own_credentials: bool = pydantic.Field(
+        False,
+        title="Use my own Global Nature Watch account",
+        description="Turn on to sign in with your own account. Leave off to use the account Gundi provides."
+    )
+    email: Optional[str] = pydantic.Field(
+        None,
+        title="Email",
+        description="Email for your Global Nature Watch account."
+    )
+    password: Optional[pydantic.SecretStr] = pydantic.Field(
+        None,
+        format="password",
+        title="Password",
+        description="Password for your Global Nature Watch account."
+    )
+
+    ui_global_options: GlobalUISchemaOptions = GlobalUISchemaOptions(
+        order=["use_own_credentials", "email", "password", "*"],
+    )
+
+    @pydantic.root_validator(pre=True)
+    def keep_saved_credentials(cls, values):
+        # Configs saved before the toggle existed hold their own email and password: keep using them.
+        if "use_own_credentials" not in values and values.get("email") and values.get("password"):
+            values["use_own_credentials"] = True
+        return values
+
+    @pydantic.root_validator
+    def require_own_credentials(cls, values):
+        if values.get("use_own_credentials") and not (values.get("email") and values.get("password")):
+            raise ValueError("Enter the email and password of your Global Nature Watch account, or turn off 'Use my own Global Nature Watch account'.")
+        return values
+
+    @property
+    def login(self) -> str:
+        """Which account signs in, safe to log."""
+        return self.email if self.use_own_credentials else "gundi-default-account"
+
+    def data_api_credentials(self) -> dict:
+        """Username and password for DataAPI: the integration's own account, or the shared one from the deployment."""
+        if self.use_own_credentials:
+            return {"username": self.email, "password": self.password.get_secret_value()}
+        if not (settings.GNW_DEFAULT_EMAIL and settings.GNW_DEFAULT_PASSWORD):
+            raise ConfigurationNotFound(
+                "The Global Nature Watch account Gundi provides isn't set up on this service. "
+                "Turn on 'Use my own Global Nature Watch account' and enter your own email and password."
+            )
+        return {"username": settings.GNW_DEFAULT_EMAIL, "password": settings.GNW_DEFAULT_PASSWORD}
+
+    class Config:
+        @staticmethod
+        def schema_extra(schema: dict):
+            # Only show email and password when the user brings their own account.
+            schema["properties"].pop("email", None)
+            schema["properties"].pop("password", None)
+            schema.update({
+                "allOf": [{
+                    "if": {"properties": {"use_own_credentials": {"const": True}}},
+                    "then": {
+                        "required": ["email", "password"],
+                        "properties": {
+                            "email": {
+                                "type": "string",
+                                "title": "Email",
+                                "description": "Email for your Global Nature Watch account."
+                            },
+                            "password": {
+                                "type": "string",
+                                "format": "password",
+                                "writeOnly": True,
+                                "title": "Password",
+                                "description": "Password for your Global Nature Watch account."
+                            }
+                        }
+                    }
+                }]
+            })
 
 
 def get_auth_config(integration):
