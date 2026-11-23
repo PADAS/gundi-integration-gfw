@@ -45,6 +45,7 @@ class FlakyRedis:
             "exists": 1,
             "setex": True,
             "delete": 1,
+            "incr": 1,
             "smembers": {b"job-1"},
             "srem": 1,
         }
@@ -79,6 +80,7 @@ GFW_METHODS = {
     "set_aoi_data": lambda m: m.set_aoi_data("int-1", {"id": "aoi-1"}),
     "get_aoi_data": lambda m: m.get_aoi_data("int-1"),
     "delete_aoi_data": lambda m: m.delete_aoi_data("int-1"),
+    "bump_reset_generation": lambda m: m.bump_reset_generation("int-1"),
     "add_pending_job": lambda m: m.add_pending_job("int-1", "get_gfw_integrated_alerts", {"job_id": "job-1"}),
     "get_pending_jobs": lambda m: m.get_pending_jobs("int-1", "get_gfw_integrated_alerts"),
     "remove_pending_job": lambda m: m.remove_pending_job("int-1", "get_gfw_integrated_alerts", "job-1"),
@@ -104,7 +106,7 @@ async def test_get_aoi_data_returns_cached_value_after_a_retry(fast_redis_retry)
     assert await manager.get_aoi_data("int-1") == {"id": "aoi-1"}
 
 
-MUTATING_METHODS = ["set_quiet_period", "set_aoi_data", "delete_aoi_data", "add_pending_job", "remove_pending_job"]
+MUTATING_METHODS = ["set_quiet_period", "set_aoi_data", "delete_aoi_data", "bump_reset_generation", "add_pending_job", "remove_pending_job"]
 
 
 @pytest.mark.asyncio
@@ -132,3 +134,16 @@ async def test_delete_aoi_data_reports_whether_anything_was_cached(deleted, expe
 
     assert await manager.delete_aoi_data("int-1") is expected
     manager.db_client.delete.assert_awaited_once_with("integration_state.int-1.aoi_data")
+
+
+@pytest.mark.asyncio
+async def test_reset_generation_starts_at_zero_and_counts_up():
+    manager = IntegrationStateManager()
+    manager.db_client = MagicMock()
+    manager.db_client.get = AsyncMock(side_effect=[None, b"3"])
+    manager.db_client.incr = AsyncMock(return_value=4)
+
+    assert await manager.get_reset_generation("int-1") == 0
+    assert await manager.get_reset_generation("int-1") == 3
+    assert await manager.bump_reset_generation("int-1") == 4
+    manager.db_client.incr.assert_awaited_once_with("integration_state.int-1.reset_generation")

@@ -136,6 +136,27 @@ class IntegrationStateManager:
             return json.loads(data)
         return None
 
+    def _reset_generation_key(self, integration_id: str) -> str:
+        return f"integration_state.{integration_id}.reset_generation"
+
+    async def get_reset_generation(self, integration_id: str) -> int:
+        """
+        How many times Clear Saved Area of Interest ran for an integration. Queued
+        work carries the value it was dispatched with and stops if it changed.
+        """
+        async for attempt in stamina.retry_context(**REDIS_RETRY):
+            with attempt:
+                value = await self.db_client.get(self._reset_generation_key(integration_id))
+        return int(value) if value else 0
+
+    async def bump_reset_generation(self, integration_id: str) -> int:
+        """Start a new generation, so work queued before it is treated as stale."""
+        if _skip_on_ephemeral_run("bump_reset_generation", integration_id, "reset_generation"):
+            return 0
+        async for attempt in stamina.retry_context(**REDIS_RETRY):
+            with attempt:
+                return int(await self.db_client.incr(self._reset_generation_key(integration_id)))
+
     async def delete_aoi_data(self, integration_id: str) -> bool:
         """
         Forget the cached AOI data for an integration, so the next run reads it

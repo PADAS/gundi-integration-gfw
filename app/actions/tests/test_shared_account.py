@@ -195,3 +195,46 @@ async def test_failed_api_key_creation_names_the_label_not_the_email(mocker):
 
     assert SHARED_EMAIL not in str(raised.value)
     assert raised.value.__suppress_context__
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method,patched", [("get_access_token", "_request_access_token"), ("get_a_valid_api_key", "create_api_key")])
+async def test_timeout_keeps_the_email_out_and_is_retried(mocker, method, patched):
+    import httpx
+    from app.actions.gfwclient import DataAPI, DataAPIConnectionError
+    from app.services.retry_policies import is_retryable_failure
+
+    request = httpx.Request("POST", "https://data-api.globalforestwatch.org/auth/token", data={"username": SHARED_EMAIL})
+    api = DataAPI(username=SHARED_EMAIL, password=SHARED_PASSWORD, account_label="gundi-default-account")
+    mocker.patch.object(api, "get_api_keys", AsyncMock(return_value=[]))
+    mocker.patch.object(api, patched, AsyncMock(side_effect=httpx.ReadTimeout("timed out", request=request)))
+
+    with pytest.raises(DataAPIConnectionError) as raised:
+        await getattr(api, method)()
+
+    assert SHARED_EMAIL not in str(raised.value)
+    assert "gundi-default-account" in str(raised.value)
+    assert not hasattr(raised.value, "request")
+    assert raised.value.__suppress_context__
+    assert is_retryable_failure(raised.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,retryable", [(401, False), (429, True), (503, True)])
+async def test_rejected_sign_in_keeps_its_status_for_the_retry_verdict(mocker, status, retryable):
+    import httpx
+    from app.actions.gfwclient import DataAPI, DataAPIAuthException
+    from app.services.retry_policies import is_retryable_failure
+
+    request = httpx.Request("POST", "https://data-api.globalforestwatch.org/auth/token")
+    response = httpx.Response(status, request=request)
+    api = DataAPI(username=SHARED_EMAIL, password=SHARED_PASSWORD, account_label="gundi-default-account")
+    mocker.patch.object(api, "_request_access_token", AsyncMock(
+        side_effect=httpx.HTTPStatusError(str(status), request=request, response=response)
+    ))
+
+    with pytest.raises(DataAPIAuthException) as raised:
+        await api.get_access_token()
+
+    assert raised.value.response.status_code == status
+    assert is_retryable_failure(raised.value) is retryable

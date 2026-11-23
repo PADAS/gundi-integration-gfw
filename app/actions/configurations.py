@@ -312,18 +312,24 @@ class PullEventsConfig(PullActionConfiguration):
 
 class GetFireAlertsDatasetAndGeostoresConfig(InternalActionConfiguration):
     integration_id: str
+    # The reset generation this work was dispatched under (see Clear Saved Area of Interest).
+    reset_generation: int = 0
     pull_events_config: PullEventsConfig
     aoi_data: AOIData
 
 
 class GetIntegratedAlertsDatasetAndGeostoresConfig(InternalActionConfiguration):
     integration_id: str
+    # The reset generation this work was dispatched under (see Clear Saved Area of Interest).
+    reset_generation: int = 0
     pull_events_config: PullEventsConfig
     aoi_data: AOIData
 
 
 class GetNasaVIIRSFireAlertsForGeostoreID(InternalActionConfiguration):
     integration_id: str
+    # The reset generation this work was dispatched under (see Clear Saved Area of Interest).
+    reset_generation: int = 0
     geostore_id: str
     date_range: tuple[datetime, datetime]
     lowest_confidence: NasaViirsFireAlertConfidenceEnum
@@ -332,6 +338,8 @@ class GetNasaVIIRSFireAlertsForGeostoreID(InternalActionConfiguration):
 
 class GetIntegratedAlertsForGeostoreID(InternalActionConfiguration):
     integration_id: str
+    # The reset generation this work was dispatched under (see Clear Saved Area of Interest).
+    reset_generation: int = 0
     geostore_id: str
     date_range: tuple[datetime, datetime]
     lowest_confidence: IntegratedAlertsConfidenceEnum

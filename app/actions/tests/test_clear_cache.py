@@ -16,6 +16,7 @@ from app.actions.handlers import action_clear_cache
 async def test_clear_cache_forgets_the_saved_area(mocker, integration_v2, mock_publish_event, cleared, message):
     mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
     state = MagicMock()
+    state.bump_reset_generation = AsyncMock(return_value=1)
     state.delete_aoi_data = AsyncMock(return_value=cleared)
     state.set_quiet_period = AsyncMock()
     state.delete_state = AsyncMock()
@@ -27,6 +28,8 @@ async def test_clear_cache_forgets_the_saved_area(mocker, integration_v2, mock_p
 
     result = await action_clear_cache(integration=integration_v2, action_config=ClearCacheConfig())
 
+    # Work queued before the clear stops before it sends or saves anything.
+    state.bump_reset_generation.assert_awaited_once_with(integration_id)
     state.delete_aoi_data.assert_awaited_once_with(integration_id)
     # The next run queries the new area straight away instead of waiting out
     # the quiet periods or a dataset update.
