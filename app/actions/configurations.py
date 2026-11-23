@@ -62,15 +62,15 @@ class AuthenticateConfig(AuthActionConfiguration, ExecutableActionMixin):
         return self.email if self.use_own_credentials else "gundi-default-account"
 
     def data_api_credentials(self) -> dict:
-        """Username and password for DataAPI: the integration's own account, or the shared one from the deployment."""
+        """DataAPI sign-in: the integration's own account, or the shared one from the deployment, plus a label safe to log."""
         if self.use_own_credentials:
-            return {"username": self.email, "password": self.password.get_secret_value()}
+            return {"username": self.email, "password": self.password.get_secret_value(), "account_label": self.login}
         if not (settings.GNW_DEFAULT_EMAIL and settings.GNW_DEFAULT_PASSWORD):
             raise IntegrationConfigurationError(
                 "The Global Nature Watch account Gundi provides isn't set up on this service. "
                 "Turn on 'Use my own Global Nature Watch account' and enter your own email and password."
             )
-        return {"username": settings.GNW_DEFAULT_EMAIL, "password": settings.GNW_DEFAULT_PASSWORD}
+        return {"username": settings.GNW_DEFAULT_EMAIL, "password": settings.GNW_DEFAULT_PASSWORD, "account_label": self.login}
 
     class Config:
         @staticmethod

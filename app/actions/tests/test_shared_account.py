@@ -29,7 +29,7 @@ def test_new_config_uses_the_shared_account(shared_account):
     config = AuthenticateConfig.parse_obj({})
 
     assert config.use_own_credentials is False
-    assert config.data_api_credentials() == {"username": SHARED_EMAIL, "password": SHARED_PASSWORD}
+    assert config.data_api_credentials() == {"username": SHARED_EMAIL, "password": SHARED_PASSWORD, "account_label": "gundi-default-account"}
     assert config.login == "gundi-default-account"
 
 
@@ -38,7 +38,7 @@ def test_saved_config_with_a_login_keeps_using_it(shared_account):
     config = AuthenticateConfig.parse_obj({"email": "ranger@example.com", "password": "pw"})
 
     assert config.use_own_credentials is True
-    assert config.data_api_credentials() == {"username": "ranger@example.com", "password": "pw"}
+    assert config.data_api_credentials() == {"username": "ranger@example.com", "password": "pw", "account_label": "ranger@example.com"}
     assert config.login == "ranger@example.com"
 
 
@@ -47,7 +47,7 @@ def test_toggle_off_ignores_a_leftover_login(shared_account):
         {"use_own_credentials": False, "email": "ranger@example.com", "password": "pw"}
     )
 
-    assert config.data_api_credentials() == {"username": SHARED_EMAIL, "password": SHARED_PASSWORD}
+    assert config.data_api_credentials() == {"username": SHARED_EMAIL, "password": SHARED_PASSWORD, "account_label": "gundi-default-account"}
 
 
 @pytest.mark.parametrize("data", [
@@ -86,7 +86,7 @@ async def test_auth_signs_in_with_the_shared_account(mocker, integration_v2, sha
     result = await action_auth(integration=integration_v2, action_config=AuthenticateConfig.parse_obj({}))
 
     assert result == {"valid_credentials": True}
-    data_api.assert_called_once_with(username=SHARED_EMAIL, password=SHARED_PASSWORD)
+    data_api.assert_called_once_with(username=SHARED_EMAIL, password=SHARED_PASSWORD, account_label="gundi-default-account")
 
 
 @pytest.mark.asyncio
@@ -153,3 +153,45 @@ def test_string_false_also_drops_a_leftover_login(shared_account):
 
     assert config.use_own_credentials is False
     assert config.email is None
+
+
+@pytest.mark.asyncio
+async def test_rejected_shared_sign_in_names_the_label_not_the_email(mocker):
+    import httpx
+    from app.actions.gfwclient import DataAPI, DataAPIAuthException
+
+    request = httpx.Request("POST", "https://data-api.globalforestwatch.org/auth/token")
+    response = httpx.Response(401, request=request)
+    mocker.patch.object(DataAPI, "_request_access_token", AsyncMock(
+        side_effect=httpx.HTTPStatusError("401", request=request, response=response)
+    ))
+    api = DataAPI(username=SHARED_EMAIL, password=SHARED_PASSWORD, account_label="gundi-default-account")
+
+    with pytest.raises(DataAPIAuthException) as raised:
+        await api.get_access_token()
+
+    assert "gundi-default-account" in str(raised.value)
+    assert SHARED_EMAIL not in str(raised.value)
+    # No failed request travels with the error, so the runner has no login body to log.
+    assert not hasattr(raised.value, "request")
+    assert raised.value.__suppress_context__
+
+
+@pytest.mark.asyncio
+async def test_failed_api_key_creation_names_the_label_not_the_email(mocker):
+    import httpx
+    from app.actions.gfwclient import DataAPI, DataAPIAuthException
+
+    request = httpx.Request("POST", "https://data-api.globalforestwatch.org/auth/apikey", json={"email": SHARED_EMAIL})
+    response = httpx.Response(400, request=request)
+    api = DataAPI(username=SHARED_EMAIL, password=SHARED_PASSWORD, account_label="gundi-default-account")
+    mocker.patch.object(api, "get_api_keys", AsyncMock(return_value=[]))
+    mocker.patch.object(api, "create_api_key", AsyncMock(
+        side_effect=httpx.HTTPStatusError("400", request=request, response=response)
+    ))
+
+    with pytest.raises(DataAPIAuthException) as raised:
+        await api.get_a_valid_api_key()
+
+    assert SHARED_EMAIL not in str(raised.value)
+    assert raised.value.__suppress_context__
