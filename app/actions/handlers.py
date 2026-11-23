@@ -933,21 +933,35 @@ async def action_sample_data(integration: Integration, action_config: SampleData
 @activity_logger(on_completion=False)  # the entry below is the completion record
 async def action_clear_cache(integration: Integration, action_config: ClearCacheConfig):
     """
-    Forget the area of interest saved for this connection (kept for 7 days), so the
-    next run reads it again from the current share link and account. Run it from the
-    portal after changing either one.
+    Forget what this connection has saved about its area of interest, so the next
+    run reads it again from the current share link and account and queries it
+    straight away. Run it from the portal after changing either one.
+
+    Clears the cached area (kept for 7 days), the wait between queries for each
+    feed, the last dataset update each feed has seen, and integrated-alert jobs
+    still queued for the old area.
     """
-    cleared = await state_manager.delete_aoi_data(str(integration.id))
+    integration_id = str(integration.id)
+    cleared = await state_manager.delete_aoi_data(integration_id)
+    for feed in ("fire_alerts", "integrated_alerts"):
+        await state_manager.set_quiet_period(integration_id, feed, 0)
+    for dataset in (DATASET_NASA_VIIRS_FIRE_ALERTS, DATASET_GFW_INTEGRATED_ALERTS):
+        await state_manager.delete_state(integration_id, "pull_events", source_id=dataset)
+    jobs_action_id = action_get_gfw_integrated_alerts.__name__.replace("action_", "")
+    pending_jobs = await state_manager.get_pending_jobs(integration_id, jobs_action_id)
+    for job in pending_jobs:
+        await state_manager.remove_pending_job(integration_id, jobs_action_id, job["job_id"])
+
     message = (
-        "Cleared the saved area of interest. The next run reads it again from the share link."
+        "Cleared the saved area of interest. The next run reads it again from the share link"
         if cleared else
-        "There was no saved area of interest to clear."
-    )
+        "There was no saved area of interest to clear. The next run reads it from the share link"
+    ) + " and fetches the alerts in the lookback days again."
     await log_action_activity(
         integration_id=integration.id,
         action_id=action_clear_cache.__name__.replace("action_", ""),
         level=LogLevel.INFO,
         title=message,
-        data={"cleared": cleared},
+        data={"cleared": cleared, "pending_jobs_removed": len(pending_jobs)},
     )
-    return {"cleared": cleared, "message": message}
+    return {"cleared": cleared, "pending_jobs_removed": len(pending_jobs), "message": message}
