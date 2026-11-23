@@ -20,6 +20,7 @@ from app.actions.configurations import (
     GetNasaVIIRSFireAlertsForGeostoreID,
     GetIntegratedAlertsForGeostoreID,
     SampleDataConfig,
+    ClearCacheConfig,
     get_pull_events_config,
 )
 from app.actions.utils import summarize_by_confidence, fire_alert_confidence, integrated_alert_confidence, unique_alerts
@@ -27,6 +28,7 @@ from app.services.errors import ConfigurationNotFound, ConfigurationValidationEr
 from app.services.action_scheduler import trigger_action
 from app.services.activity_logger import activity_logger, log_action_activity
 from app.services.action_scheduler import crontab_schedule
+from app.actions.core import action_title
 from app.services.gundi import send_events_to_gundi
 from app.services.state import IntegrationStateManager
 
@@ -104,6 +106,7 @@ def transform_integrated_alert(alert):
     )
 
 
+@action_title("Authentication")
 async def action_auth(integration, action_config: AuthenticateConfig):
     # Log ids only: Integration.configurations[].data is a plain dict that carries the GFW password.
     logger.info(f"Executing auth action for integration {integration.id} ({integration.name})...")
@@ -120,6 +123,7 @@ async def action_auth(integration, action_config: AuthenticateConfig):
     return {"valid_credentials": token is not None}
 
 
+@action_title("Fetch Alerts from Global Nature Watch")
 @activity_logger()
 @crontab_schedule("*/10 * * * *")
 async def action_pull_events(integration: Integration, action_config: PullEventsConfig):
@@ -901,6 +905,7 @@ async def sample_integration_data(
     return result
 
 
+@action_title("Preview Alerts in the Area")
 @activity_logger(on_completion=False)  # the entry below is the completion record
 async def action_sample_data(integration: Integration, action_config: SampleDataConfig):
     """
@@ -922,3 +927,27 @@ async def action_sample_data(integration: Integration, action_config: SampleData
         data=result,
     )
     return result
+
+
+@action_title("Clear Saved Area of Interest")
+@activity_logger(on_completion=False)  # the entry below is the completion record
+async def action_clear_cache(integration: Integration, action_config: ClearCacheConfig):
+    """
+    Forget the area of interest saved for this connection (kept for 7 days), so the
+    next run reads it again from the current share link and account. Run it from the
+    portal after changing either one.
+    """
+    cleared = await state_manager.delete_aoi_data(str(integration.id))
+    message = (
+        "Cleared the saved area of interest. The next run reads it again from the share link."
+        if cleared else
+        "There was no saved area of interest to clear."
+    )
+    await log_action_activity(
+        integration_id=integration.id,
+        action_id=action_clear_cache.__name__.replace("action_", ""),
+        level=LogLevel.INFO,
+        title=message,
+        data={"cleared": cleared},
+    )
+    return {"cleared": cleared, "message": message}

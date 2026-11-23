@@ -136,6 +136,18 @@ class IntegrationStateManager:
             return json.loads(data)
         return None
 
+    async def delete_aoi_data(self, integration_id: str) -> bool:
+        """
+        Forget the cached AOI data for an integration, so the next run reads it
+        again from the share link. Returns whether anything was cached.
+        """
+        if _skip_on_ephemeral_run("delete_aoi_data", integration_id, "aoi_data"):
+            return False
+        async for attempt in stamina.retry_context(**REDIS_RETRY):
+            with attempt:
+                deleted = await self.db_client.delete(f"integration_state.{integration_id}.aoi_data")
+        return bool(deleted)
+
     # Default TTL for pending jobs: 24 hours
     # Jobs should complete well within this time, and expired jobs will be cleaned up automatically
     DEFAULT_JOB_TTL_SECONDS = 86400  # 24 hours

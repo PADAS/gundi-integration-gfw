@@ -359,6 +359,13 @@ class SampleDataConfig(GenericActionConfiguration, ExecutableActionMixin):
     )
 
 
+class ClearCacheConfig(GenericActionConfiguration, ExecutableActionMixin):
+    """
+    Forget the area of interest saved for this connection, so the next run reads it
+    again from the current share link and account.
+    """
+
+
 def get_pull_events_config(integration) -> PullEventsConfig:
     """Load the integration's pull_events config, or raise with a reason support can act on."""
     config = find_config_for_action(

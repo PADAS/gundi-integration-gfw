@@ -78,6 +78,7 @@ GFW_METHODS = {
     "is_quiet_period": lambda m: m.is_quiet_period("int-1", "fire_alerts"),
     "set_aoi_data": lambda m: m.set_aoi_data("int-1", {"id": "aoi-1"}),
     "get_aoi_data": lambda m: m.get_aoi_data("int-1"),
+    "delete_aoi_data": lambda m: m.delete_aoi_data("int-1"),
     "add_pending_job": lambda m: m.add_pending_job("int-1", "get_gfw_integrated_alerts", {"job_id": "job-1"}),
     "get_pending_jobs": lambda m: m.get_pending_jobs("int-1", "get_gfw_integrated_alerts"),
     "remove_pending_job": lambda m: m.remove_pending_job("int-1", "get_gfw_integrated_alerts", "job-1"),
@@ -103,7 +104,7 @@ async def test_get_aoi_data_returns_cached_value_after_a_retry(fast_redis_retry)
     assert await manager.get_aoi_data("int-1") == {"id": "aoi-1"}
 
 
-MUTATING_METHODS = ["set_quiet_period", "set_aoi_data", "add_pending_job", "remove_pending_job"]
+MUTATING_METHODS = ["set_quiet_period", "set_aoi_data", "delete_aoi_data", "add_pending_job", "remove_pending_job"]
 
 
 @pytest.mark.asyncio
@@ -120,3 +121,14 @@ async def test_gfw_mutating_methods_noop_on_ephemeral_run(method):
         ephemeral_run.reset(token)
 
     assert manager.db_client.method_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("deleted,expected", [(1, True), (0, False)])
+async def test_delete_aoi_data_reports_whether_anything_was_cached(deleted, expected):
+    manager = IntegrationStateManager()
+    manager.db_client = MagicMock()
+    manager.db_client.delete = AsyncMock(return_value=deleted)
+
+    assert await manager.delete_aoi_data("int-1") is expected
+    manager.db_client.delete.assert_awaited_once_with("integration_state.int-1.aoi_data")
