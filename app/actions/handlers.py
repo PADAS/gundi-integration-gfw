@@ -23,7 +23,7 @@ from app.actions.configurations import (
     get_pull_events_config,
 )
 from app.actions.utils import summarize_by_confidence, fire_alert_confidence, integrated_alert_confidence, unique_alerts
-from app.services.errors import ConfigurationNotFound, ConfigurationValidationError
+from app.services.errors import ConfigurationNotFound, ConfigurationValidationError, IntegrationConfigurationError
 from app.services.action_scheduler import trigger_action
 from app.services.activity_logger import activity_logger, log_action_activity
 from app.services.action_scheduler import crontab_schedule
@@ -110,7 +110,7 @@ async def action_auth(integration, action_config: AuthenticateConfig):
     try:
         dataapi = DataAPI(**action_config.data_api_credentials())
         token = await dataapi.get_access_token()
-    except ConfigurationNotFound as e:
+    except IntegrationConfigurationError as e:
         return {"valid_credentials": False, "message": str(e)}
     except DataAPIAuthException as e:
         return {"valid_credentials": False, "message": f"Failed to authenticate with Global Nature Watch Data API: {e}"}
@@ -804,7 +804,7 @@ async def sample_integration_data(
 
     try:
         dataapi = dataapi or DataAPI(**auth_config.data_api_credentials())
-    except ConfigurationNotFound as e:
+    except IntegrationConfigurationError as e:
         return {"error": str(e)}
 
     # Resolve the AOI the same way pull_events does: cache first, then the share link.

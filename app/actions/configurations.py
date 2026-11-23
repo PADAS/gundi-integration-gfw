@@ -8,7 +8,7 @@ from typing import Optional
 from app.actions.core import PullActionConfiguration, AuthActionConfiguration, ExecutableActionMixin, InternalActionConfiguration, GenericActionConfiguration
 from app.actions.gfwclient import AOIData, DatasetResponseItem, IntegratedAlertsConfidenceEnum, IntegratedAlertsConfidenceEnumOrder, \
     NasaViirsFireAlertConfidenceEnum, NasaViirsFireAlertConfidenceEnumOrder
-from app.services.errors import ConfigurationNotFound, ConfigurationValidationError
+from app.services.errors import ConfigurationNotFound, ConfigurationValidationError, IntegrationConfigurationError
 from app.services.utils import find_config_for_action, FieldWithUIOptions, UIOptions, GlobalUISchemaOptions
 
 
@@ -36,9 +36,18 @@ class AuthenticateConfig(AuthActionConfiguration, ExecutableActionMixin):
 
     @pydantic.root_validator(pre=True)
     def keep_saved_credentials(cls, values):
-        # Configs saved before the toggle existed hold their own email and password: keep using them.
-        if "use_own_credentials" not in values and values.get("email") and values.get("password"):
+        # Configs saved before the toggle existed hold their own login: keep using it.
+        # An email alone is enough, so a half-filled login fails validation instead of
+        # quietly falling back to the shared account.
+        if "use_own_credentials" not in values and values.get("email"):
             values["use_own_credentials"] = True
+        # With the switch off, a login left behind in the form isn't used: drop it.
+        flag = values.get("use_own_credentials")
+        if isinstance(flag, str):
+            flag = flag.strip().lower() in ("true", "1", "yes", "on")
+        if not flag:
+            values.pop("email", None)
+            values.pop("password", None)
         return values
 
     @pydantic.root_validator
@@ -57,7 +66,7 @@ class AuthenticateConfig(AuthActionConfiguration, ExecutableActionMixin):
         if self.use_own_credentials:
             return {"username": self.email, "password": self.password.get_secret_value()}
         if not (settings.GNW_DEFAULT_EMAIL and settings.GNW_DEFAULT_PASSWORD):
-            raise ConfigurationNotFound(
+            raise IntegrationConfigurationError(
                 "The Global Nature Watch account Gundi provides isn't set up on this service. "
                 "Turn on 'Use my own Global Nature Watch account' and enter your own email and password."
             )
@@ -77,12 +86,15 @@ class AuthenticateConfig(AuthActionConfiguration, ExecutableActionMixin):
                         "properties": {
                             "email": {
                                 "type": "string",
+                                "format": "email",
+                                "minLength": 1,
                                 "title": "Email",
                                 "description": "Email for your Global Nature Watch account."
                             },
                             "password": {
                                 "type": "string",
                                 "format": "password",
+                                "minLength": 1,
                                 "writeOnly": True,
                                 "title": "Password",
                                 "description": "Password for your Global Nature Watch account."

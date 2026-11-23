@@ -6,7 +6,7 @@ import pytest
 
 from app.actions.configurations import AuthenticateConfig
 from app.actions.handlers import action_auth
-from app.services.errors import ConfigurationNotFound
+from app.services.errors import IntegrationConfigurationError
 
 
 SHARED_EMAIL = "shared@example.com"
@@ -61,7 +61,7 @@ def test_own_account_needs_email_and_password(data):
 
 
 def test_missing_shared_account_raises_a_clear_error(no_shared_account):
-    with pytest.raises(ConfigurationNotFound, match="Use my own Global Nature Watch account"):
+    with pytest.raises(IntegrationConfigurationError, match="Use my own Global Nature Watch account"):
         AuthenticateConfig.parse_obj({}).data_api_credentials()
 
 
@@ -98,3 +98,58 @@ async def test_auth_reports_a_missing_shared_account(mocker, integration_v2, no_
     assert result["valid_credentials"] is False
     assert "Use my own Global Nature Watch account" in result["message"]
     data_api.assert_not_called()
+
+
+def test_saved_email_without_password_fails_instead_of_using_the_shared_account(shared_account):
+    with pytest.raises(pydantic.ValidationError):
+        AuthenticateConfig.parse_obj({"email": "ranger@example.com", "password": ""})
+
+
+def test_switch_off_drops_a_leftover_login(shared_account):
+    config = AuthenticateConfig.parse_obj(
+        {"use_own_credentials": False, "email": "ranger@example.com", "password": "pw"}
+    )
+
+    assert config.email is None
+    assert config.password is None
+
+
+def test_schema_rejects_a_blank_login():
+    fields = json.loads(AuthenticateConfig.schema_json())["allOf"][0]["then"]["properties"]
+
+    assert fields["email"]["minLength"] == 1
+    assert fields["password"]["minLength"] == 1
+
+
+@pytest.mark.asyncio
+async def test_pull_events_reports_a_missing_shared_account(mocker, integration_v2_as_dict, mock_publish_event, no_shared_account):
+    from gundi_core.schemas.v2 import Integration
+    from app.actions.configurations import PullEventsConfig
+    from app.actions.handlers import action_pull_events
+
+    data = dict(integration_v2_as_dict)
+    data["configurations"] = [{
+        "id": "30f8878c-4a98-4c95-88eb-79f73c40fb2f",
+        "integration": data["id"],
+        "action": {"id": "80448d1c-4696-4b32-a59f-f3494fc949ac", "type": "auth", "name": "Authenticate", "value": "auth"},
+        "data": {"use_own_credentials": False},
+    }]
+    mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
+    data_api = mocker.patch("app.actions.handlers.DataAPI")
+    config = PullEventsConfig(gfw_share_link_url="https://www.globalforestwatch.org/dashboards/aoi/abc123")
+
+    with pytest.raises(IntegrationConfigurationError):
+        await action_pull_events(integration=Integration.parse_obj(data), action_config=config)
+
+    data_api.assert_not_called()
+    logged = json.dumps([str(call) for call in mock_publish_event.call_args_list])
+    assert "isn't set up on this service" in logged
+
+
+def test_string_false_also_drops_a_leftover_login(shared_account):
+    config = AuthenticateConfig.parse_obj(
+        {"use_own_credentials": "false", "email": "ranger@example.com", "password": "pw"}
+    )
+
+    assert config.use_own_credentials is False
+    assert config.email is None
