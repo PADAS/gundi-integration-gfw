@@ -63,9 +63,14 @@ def mock_dataapi(mocker):
 
 
 @pytest.fixture
-def mock_state(mocker):
+def mock_state(mocker, action_config):
     state = MagicMock()
-    state.get_pending_jobs = AsyncMock(return_value=[{"job_id": "job-1", "job_link": "https://gfw.example/job/job-1"}])
+    # The connection's saved area is the one the action was dispatched for.
+    state.get_aoi_data = AsyncMock(return_value=action_config.aoi_data.dict())
+    state.get_reset_generation = AsyncMock(return_value=0)
+    state.get_pending_jobs = AsyncMock(return_value=[
+        {"job_id": "job-1", "job_link": "https://gfw.example/job/job-1", "geostore_id": "geo-1"}
+    ])
     state.remove_pending_job = AsyncMock()
     state.add_pending_job = AsyncMock()
     # Dataset already processed at its current updated_on, so no new batch job is created.
@@ -124,7 +129,7 @@ async def test_expired_download_link_reports_the_last_send_error(gfw_integration
     from app.actions.gfwclient import DownloadLinkExpiredException
 
     mock_state.get_pending_jobs = AsyncMock(return_value=[{
-        "job_id": "job-1", "job_link": "https://gfw.example/job/job-1",
+        "job_id": "job-1", "job_link": "https://gfw.example/job/job-1", "geostore_id": "geo-1",
         "last_send_error": "Sensors API returned error: HTTP 400",
     }])
     mock_dataapi.download_job_results = AsyncMock(side_effect=DownloadLinkExpiredException("expired"))
@@ -149,3 +154,78 @@ async def test_our_own_gundi_auth_failure_is_not_swallowed_by_the_poll_loop(gfw_
     with pytest.raises(AuthenticationError):
         await action_get_gfw_integrated_alerts(integration=gfw_integration, action_config=action_config)
     mock_state.remove_pending_job.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_work_for_a_cleared_area_sends_nothing_and_keeps_state(gfw_integration, action_config, mock_dataapi, mock_state, mock_activity_log, mocker):
+    # Clear Saved Area of Interest ran after this work was queued.
+    mock_state.get_aoi_data = AsyncMock(return_value=None)
+    send = mocker.patch("app.actions.handlers.handle_transformed_data", AsyncMock())
+
+    result = await action_get_gfw_integrated_alerts(integration=gfw_integration, action_config=action_config)
+
+    assert result == {"skipped": "stale_area", "geostore_id": "geo-1"}
+    send.assert_not_called()
+    mock_state.set_state.assert_not_called()
+    mock_state.set_quiet_period.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_pending_job_for_an_old_area_is_dropped_unsent(gfw_integration, action_config, mock_dataapi, mock_state, mock_activity_log, mocker):
+    mock_state.get_pending_jobs = AsyncMock(return_value=[
+        {"job_id": "old-job", "job_link": "https://gfw.example/job/old-job", "geostore_id": "geo-old"}
+    ])
+    send = mocker.patch("app.actions.handlers.handle_transformed_data", AsyncMock())
+
+    await action_get_gfw_integrated_alerts(integration=gfw_integration, action_config=action_config)
+
+    send.assert_not_called()
+    mock_dataapi.get_job_status.assert_not_called()
+    mock_state.remove_pending_job.assert_awaited_once_with(str(gfw_integration.id), "get_gfw_integrated_alerts", "old-job")
+
+
+@pytest.mark.asyncio
+async def test_clear_during_a_pending_download_sends_nothing(gfw_integration, action_config, mock_dataapi, mock_state, mock_activity_log, mocker):
+    # Clear Saved Area of Interest runs while the job's results are downloading.
+    mock_state.get_reset_generation = AsyncMock(side_effect=[0, 1])
+    send = mocker.patch("app.actions.handlers.handle_transformed_data", AsyncMock())
+
+    result = await action_get_gfw_integrated_alerts(integration=gfw_integration, action_config=action_config)
+
+    assert result["skipped"] == "stale_area"
+    mock_dataapi.download_job_results.assert_awaited_once()
+    send.assert_not_called()
+    mock_state.remove_pending_job.assert_awaited_once_with(str(gfw_integration.id), "get_gfw_integrated_alerts", "job-1")
+    mock_state.set_state.assert_not_called()
+    mock_state.set_quiet_period.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_work_from_before_a_clear_stays_stale_when_the_same_area_is_saved_again(gfw_integration, action_config, mock_dataapi, mock_state, mock_activity_log, mocker):
+    # The clear ran (generation 1) and the next pull saved the same area again;
+    # this work was queued under generation 0.
+    mock_state.get_reset_generation = AsyncMock(return_value=1)
+    send = mocker.patch("app.actions.handlers.handle_transformed_data", AsyncMock())
+
+    result = await action_get_gfw_integrated_alerts(integration=gfw_integration, action_config=action_config)
+
+    assert result == {"skipped": "stale_area", "geostore_id": "geo-1"}
+    send.assert_not_called()
+    mock_state.set_state.assert_not_called()
+    mock_state.set_quiet_period.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_pending_job_from_an_earlier_generation_is_dropped(gfw_integration, action_config, mock_dataapi, mock_state, mock_activity_log, mocker):
+    action_config.reset_generation = 2
+    mock_state.get_reset_generation = AsyncMock(return_value=2)
+    mock_state.get_pending_jobs = AsyncMock(return_value=[
+        {"job_id": "job-1", "job_link": "https://gfw.example/job/job-1", "geostore_id": "geo-1", "reset_generation": 1}
+    ])
+    send = mocker.patch("app.actions.handlers.handle_transformed_data", AsyncMock())
+
+    await action_get_gfw_integrated_alerts(integration=gfw_integration, action_config=action_config)
+
+    send.assert_not_called()
+    mock_dataapi.get_job_status.assert_not_called()
+    mock_state.remove_pending_job.assert_awaited_once_with(str(gfw_integration.id), "get_gfw_integrated_alerts", "job-1")

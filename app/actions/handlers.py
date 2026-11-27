@@ -20,13 +20,15 @@ from app.actions.configurations import (
     GetNasaVIIRSFireAlertsForGeostoreID,
     GetIntegratedAlertsForGeostoreID,
     SampleDataConfig,
+    ClearCacheConfig,
     get_pull_events_config,
 )
 from app.actions.utils import summarize_by_confidence, fire_alert_confidence, integrated_alert_confidence, unique_alerts
-from app.services.errors import ConfigurationNotFound, ConfigurationValidationError
+from app.services.errors import ConfigurationNotFound, ConfigurationValidationError, IntegrationConfigurationError
 from app.services.action_scheduler import trigger_action
 from app.services.activity_logger import activity_logger, log_action_activity
 from app.services.action_scheduler import crontab_schedule
+from app.actions.core import action_title
 from app.services.gundi import send_events_to_gundi
 from app.services.state import IntegrationStateManager
 
@@ -74,6 +76,30 @@ async def handle_transformed_data(transformed_data, integration_id, action_id):
         return response
 
 
+async def _work_is_current(integration_id: str, geostore_id, reset_generation: int) -> bool:
+    """
+    Whether work dispatched for `geostore_id` under `reset_generation` is still
+    current. False once Clear Saved Area of Interest ran since it was queued (even
+    if the same area was saved again), or if the saved area is another one, so
+    stale work neither sends its alerts nor writes back the quiet period and dataset
+    status the clear reset. Checked right before each send and each state write.
+    """
+    if await state_manager.get_reset_generation(integration_id) != reset_generation:
+        return False
+    cached = await state_manager.get_aoi_data(integration_id)
+    if not cached:
+        return False
+    return AOIData.parse_obj(cached).attributes.geostore == geostore_id
+
+
+def _stale_area_result(integration_id: str, action_id: str, geostore_id) -> dict:
+    logger.info(
+        f"Skipping '{action_id}' for integration {integration_id}: area {geostore_id} is no longer the saved area.",
+        extra={"integration_id": integration_id, "geostore_id": geostore_id},
+    )
+    return {"skipped": "stale_area", "geostore_id": geostore_id}
+
+
 def transform_fire_alert(alert):
     event_time = alert.alert_date.replace(tzinfo=timezone.utc).isoformat()
     title = "GNW VIIRS Alert"
@@ -104,12 +130,15 @@ def transform_integrated_alert(alert):
     )
 
 
+@action_title("Authentication")
 async def action_auth(integration, action_config: AuthenticateConfig):
     # Log ids only: Integration.configurations[].data is a plain dict that carries the GFW password.
     logger.info(f"Executing auth action for integration {integration.id} ({integration.name})...")
     try:
-        dataapi = DataAPI(username=action_config.email, password=action_config.password.get_secret_value())
+        dataapi = DataAPI(**action_config.data_api_credentials())
         token = await dataapi.get_access_token()
+    except IntegrationConfigurationError as e:
+        return {"valid_credentials": False, "message": str(e)}
     except DataAPIAuthException as e:
         return {"valid_credentials": False, "message": f"Failed to authenticate with Global Nature Watch Data API: {e}"}
     else:
@@ -118,6 +147,7 @@ async def action_auth(integration, action_config: AuthenticateConfig):
     return {"valid_credentials": token is not None}
 
 
+@action_title("Fetch Alerts from Global Nature Watch")
 @activity_logger()
 @crontab_schedule("*/10 * * * *")
 async def action_pull_events(integration: Integration, action_config: PullEventsConfig):
@@ -129,7 +159,7 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
     auth_config = get_auth_config(integration)
 
     # Get AOI data from API, with fallback to cached data
-    dataapi = DataAPI(username=auth_config.email, password=auth_config.password.get_secret_value())
+    dataapi = DataAPI(**auth_config.data_api_credentials())
     aoi_data = None
 
     # Prefer cached AOI data, fall back to API if not available
@@ -180,6 +210,7 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
         return result
 
     # Trigger feed-specific sub-actions independently (each with its own quiet period)
+    reset_generation = await state_manager.get_reset_generation(str(integration.id))
     triggered_actions = []
     skipped_actions = []
     
@@ -192,7 +223,8 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
             fire_config = GetFireAlertsDatasetAndGeostoresConfig(
                 integration_id=str(integration.id),
                 pull_events_config=action_config,
-                aoi_data=aoi_data
+                aoi_data=aoi_data,
+                reset_generation=reset_generation,
             )
             await trigger_action(integration.id, action_get_nasa_viirs_fire_alerts.__name__.replace("action_", ""), config=fire_config)
             triggered_actions.append("fire_alerts")
@@ -209,7 +241,8 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
             integrated_config = GetIntegratedAlertsDatasetAndGeostoresConfig(
                 integration_id=str(integration.id),
                 pull_events_config=action_config,
-                aoi_data=aoi_data
+                aoi_data=aoi_data,
+                reset_generation=reset_generation,
             )
             await trigger_action(integration.id, integrated_action_id, config=integrated_config)
             triggered_actions.append("integrated_alerts (polling jobs)")
@@ -220,7 +253,8 @@ async def action_pull_events(integration: Integration, action_config: PullEvents
             integrated_config = GetIntegratedAlertsDatasetAndGeostoresConfig(
                 integration_id=str(integration.id),
                 pull_events_config=action_config,
-                aoi_data=aoi_data
+                aoi_data=aoi_data,
+                reset_generation=reset_generation,
             )
             await trigger_action(integration.id, integrated_action_id, config=integrated_config)
             triggered_actions.append("integrated_alerts")
@@ -247,8 +281,7 @@ def generate_date_pairs(lower_date, upper_date, interval=10):
 async def action_get_nasa_viirs_fire_alerts(integration: Integration, action_config: GetFireAlertsDatasetAndGeostoresConfig):
     auth_config = get_auth_config(integration)
     dataapi = DataAPI(
-        username=auth_config.email,
-        password=auth_config.password.get_secret_value()
+        **auth_config.data_api_credentials()
     )
 
     fire_dataset_metadata = None
@@ -256,6 +289,9 @@ async def action_get_nasa_viirs_fire_alerts(integration: Integration, action_con
 
     # Use the geostore ID from AOI data
     geostore_ids = [action_config.aoi_data.attributes.geostore]
+    fire_action_id = action_get_nasa_viirs_fire_alerts.__name__.replace("action_", "")
+    if not await _work_is_current(str(integration.id), geostore_ids[0], action_config.reset_generation):
+        return _stale_area_result(str(integration.id), fire_action_id, geostore_ids[0])
 
     # Date ranges are in whole days, so we round to next midnight.
     end_date = (datetime.now(tz=timezone.utc) + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -293,7 +329,7 @@ async def action_get_nasa_viirs_fire_alerts(integration: Integration, action_con
             msg,
             extra={
                 "integration_id": str(integration.id),
-                "integration_login": auth_config.email,
+                "integration_login": auth_config.login,
                 "dataset_updated_on": fire_dataset_metadata.updated_on.isoformat(),
             },
         )
@@ -316,7 +352,8 @@ async def action_get_nasa_viirs_fire_alerts(integration: Integration, action_con
                     geostore_id=geostore_id,
                     date_range=(lower, upper),
                     lowest_confidence=action_config.pull_events_config.fire_alerts_lowest_confidence,
-                    dataset=fire_dataset_metadata
+                    dataset=fire_dataset_metadata,
+                    reset_generation=action_config.reset_generation,
                 )
 
                 await trigger_action(
@@ -333,12 +370,13 @@ async def action_get_nasa_viirs_fire_alerts(integration: Integration, action_con
             latest_updated_on=fire_dataset_metadata.updated_on
         )
 
-        await state_manager.set_state(
-            str(integration.id),
-            "pull_events",
-            fire_dataset_status.dict(),
-            source_id=DATASET_NASA_VIIRS_FIRE_ALERTS
-        )
+        if await _work_is_current(str(integration.id), geostore_ids[0], action_config.reset_generation):
+            await state_manager.set_state(
+                str(integration.id),
+                "pull_events",
+                fire_dataset_status.dict(),
+                source_id=DATASET_NASA_VIIRS_FIRE_ALERTS
+            )
 
     # Set tiered quiet period based on outcome
     if fire_alerts_actions_triggered > 0:
@@ -348,9 +386,10 @@ async def action_get_nasa_viirs_fire_alerts(integration: Integration, action_con
         # No updates - short quiet period for frequent cheap metadata checks
         quiet_minutes = random.randint(30, 60)
 
-    await state_manager.set_quiet_period(
-        str(integration.id), "fire_alerts", timedelta(minutes=quiet_minutes)
-    )
+    if await _work_is_current(str(integration.id), geostore_ids[0], action_config.reset_generation):
+        await state_manager.set_quiet_period(
+            str(integration.id), "fire_alerts", timedelta(minutes=quiet_minutes)
+        )
 
     return {
         "fire_alerts_actions_triggered": fire_alerts_actions_triggered,
@@ -361,8 +400,7 @@ async def action_get_nasa_viirs_fire_alerts(integration: Integration, action_con
 async def action_get_gfw_integrated_alerts(integration: Integration, action_config: GetIntegratedAlertsDatasetAndGeostoresConfig):
     auth_config = get_auth_config(integration)
     dataapi = DataAPI(
-        username=auth_config.email,
-        password=auth_config.password.get_secret_value()
+        **auth_config.data_api_credentials()
     )
 
     result = {
@@ -377,10 +415,18 @@ async def action_get_gfw_integrated_alerts(integration: Integration, action_conf
     # Derive action ID from function name
     action_id = action_get_gfw_integrated_alerts.__name__.replace("action_", "")
 
+    current_geostore = action_config.aoi_data.attributes.geostore
+    if not await _work_is_current(str(integration.id), current_geostore, action_config.reset_generation):
+        return _stale_area_result(str(integration.id), action_id, current_geostore)
+
     # Step 1: Poll any pending jobs from previous runs
     pending_jobs = await state_manager.get_pending_jobs(str(integration.id), action_id)
     
     for job_data in pending_jobs:
+        if job_data.get("geostore_id") != current_geostore or job_data.get("reset_generation", 0) != action_config.reset_generation:
+            # Queued for an area this connection no longer uses: drop it unsent.
+            await state_manager.remove_pending_job(str(integration.id), action_id, job_data.get("job_id"))
+            continue
         result["jobs_polled"] += 1
         job_id = job_data.get("job_id")
         job_link = job_data.get("job_link")
@@ -418,6 +464,10 @@ async def action_get_gfw_integrated_alerts(integration: Integration, action_conf
                         integrated_alerts = [IntegratedAlert.parse_obj(alert) for alert in alerts_data]
                         transformed_data = [transform_integrated_alert(alert) for alert in integrated_alerts]
                         
+                        if not await _work_is_current(str(integration.id), current_geostore, action_config.reset_generation):
+                            # Cleared while this job was downloading: drop it unsent.
+                            await state_manager.remove_pending_job(str(integration.id), action_id, job_id)
+                            return _stale_area_result(str(integration.id), action_id, current_geostore)
                         send_result = await handle_transformed_data(
                             transformed_data,
                             str(integration.id),
@@ -545,7 +595,7 @@ async def action_get_gfw_integrated_alerts(integration: Integration, action_conf
             msg,
             extra={
                 "integration_id": str(integration.id),
-                "integration_login": auth_config.email,
+                "integration_login": auth_config.login,
                 "dataset_updated_on": integrated_dataset_metadata.updated_on.isoformat(),
             },
         )
@@ -576,6 +626,7 @@ async def action_get_gfw_integrated_alerts(integration: Integration, action_conf
                         "job_id": job_response.data.job_id,
                         "job_link": str(job_response.data.job_link),
                         "geostore_id": geostore_id,
+                        "reset_generation": action_config.reset_generation,
                         "date_range_start": start_date.isoformat(),
                         "date_range_end": end_date.isoformat(),
                         "created_at": datetime.now(tz=timezone.utc).isoformat()
@@ -602,12 +653,13 @@ async def action_get_gfw_integrated_alerts(integration: Integration, action_conf
             latest_updated_on=integrated_dataset_metadata.updated_on
         )
 
-        await state_manager.set_state(
-            str(integration.id),
-            "pull_events",
-            integrated_dataset_status.dict(),
-            source_id=DATASET_GFW_INTEGRATED_ALERTS
-        )
+        if await _work_is_current(str(integration.id), current_geostore, action_config.reset_generation):
+            await state_manager.set_state(
+                str(integration.id),
+                "pull_events",
+                integrated_dataset_status.dict(),
+                source_id=DATASET_GFW_INTEGRATED_ALERTS
+            )
 
     # Set tiered quiet period based on outcome
     if result["jobs_pending"] > 0:
@@ -620,9 +672,10 @@ async def action_get_gfw_integrated_alerts(integration: Integration, action_conf
         # No updates, no pending jobs - short quiet period for frequent cheap metadata checks
         quiet_minutes = random.randint(30, 60)
 
-    await state_manager.set_quiet_period(
-        str(integration.id), "integrated_alerts", timedelta(minutes=quiet_minutes)
-    )
+    if await _work_is_current(str(integration.id), current_geostore, action_config.reset_generation):
+        await state_manager.set_quiet_period(
+            str(integration.id), "integrated_alerts", timedelta(minutes=quiet_minutes)
+        )
     
     result["quiet_period_minutes"] = quiet_minutes
     return result
@@ -637,8 +690,7 @@ async def action_get_gfw_integrated_alerts_for_date_range(
     total_alerts = 0
     auth_config = get_auth_config(integration)
     dataapi = DataAPI(
-        username=auth_config.email,
-        password=auth_config.password.get_secret_value()
+        **auth_config.data_api_credentials()
     )
 
     integrated_alerts = await dataapi.get_gfw_integrated_alerts(
@@ -648,6 +700,8 @@ async def action_get_gfw_integrated_alerts_for_date_range(
         semaphore=sema
     )
 
+    if integrated_alerts and not await _work_is_current(str(integration.id), action_config.geostore_id, action_config.reset_generation):
+        return _stale_area_result(str(integration.id), "get_gfw_integrated_alerts_for_date_range", action_config.geostore_id)
     if integrated_alerts:
         logger.info(f"Integrated alerts pulled with success.")
         transformed_data = [transform_integrated_alert(alert) for alert in integrated_alerts]
@@ -673,8 +727,7 @@ async def action_get_nasa_viirs_fire_alerts_for_geostore_and_date_range(
     total_alerts = 0
     auth_config = get_auth_config(integration)
     dataapi = DataAPI(
-        username=auth_config.email,
-        password=auth_config.password.get_secret_value()
+        **auth_config.data_api_credentials()
     )
     fire_alerts = await dataapi.get_nasa_viirs_fire_alerts(
         geostore_id=action_config.geostore_id,
@@ -683,6 +736,8 @@ async def action_get_nasa_viirs_fire_alerts_for_geostore_and_date_range(
         semaphore=sema
     )
 
+    if fire_alerts and not await _work_is_current(str(integration.id), action_config.geostore_id, action_config.reset_generation):
+        return _stale_area_result(str(integration.id), "get_nasa_viirs_fire_alerts_for_geostore_and_date_range", action_config.geostore_id)
     if fire_alerts:
         logger.info(f"Total fire alerts fetched: {len(fire_alerts)}")
         transformed_data = [transform_fire_alert(alert) for alert in fire_alerts]
@@ -804,7 +859,10 @@ async def sample_integration_data(
     except (ConfigurationNotFound, ConfigurationValidationError) as e:
         return {"error": str(e)}
 
-    dataapi = dataapi or DataAPI(username=auth_config.email, password=auth_config.password.get_secret_value())
+    try:
+        dataapi = dataapi or DataAPI(**auth_config.data_api_credentials())
+    except IntegrationConfigurationError as e:
+        return {"error": str(e)}
 
     # Resolve the AOI the same way pull_events does: cache first, then the share link.
     aoi_data = None
@@ -900,6 +958,7 @@ async def sample_integration_data(
     return result
 
 
+@action_title("Preview Alerts in the Area")
 @activity_logger(on_completion=False)  # the entry below is the completion record
 async def action_sample_data(integration: Integration, action_config: SampleDataConfig):
     """
@@ -921,3 +980,43 @@ async def action_sample_data(integration: Integration, action_config: SampleData
         data=result,
     )
     return result
+
+
+@action_title("Clear Saved Area of Interest")
+@activity_logger(on_completion=False)  # the entry below is the completion record
+async def action_clear_cache(integration: Integration, action_config: ClearCacheConfig):
+    """
+    Forget what this connection has saved about its area of interest, so the next
+    run reads it again from the current share link and account and queries it
+    straight away. Run it from the portal after changing either one.
+
+    Clears the cached area (kept for 7 days), the wait between queries for each
+    feed, the last dataset update each feed has seen, and integrated-alert jobs
+    still queued for the old area.
+    """
+    integration_id = str(integration.id)
+    # First, so work already queued stops before it sends or saves anything.
+    await state_manager.bump_reset_generation(integration_id)
+    cleared = await state_manager.delete_aoi_data(integration_id)
+    for feed in ("fire_alerts", "integrated_alerts"):
+        await state_manager.set_quiet_period(integration_id, feed, 0)
+    for dataset in (DATASET_NASA_VIIRS_FIRE_ALERTS, DATASET_GFW_INTEGRATED_ALERTS):
+        await state_manager.delete_state(integration_id, "pull_events", source_id=dataset)
+    jobs_action_id = action_get_gfw_integrated_alerts.__name__.replace("action_", "")
+    pending_jobs = await state_manager.get_pending_jobs(integration_id, jobs_action_id)
+    for job in pending_jobs:
+        await state_manager.remove_pending_job(integration_id, jobs_action_id, job["job_id"])
+
+    message = (
+        "Cleared the saved area of interest. The next run reads it again from the share link"
+        if cleared else
+        "There was no saved area of interest to clear. The next run reads it from the share link"
+    ) + " and fetches the alerts in the lookback days again."
+    await log_action_activity(
+        integration_id=integration.id,
+        action_id=action_clear_cache.__name__.replace("action_", ""),
+        level=LogLevel.INFO,
+        title=message,
+        data={"cleared": cleared, "pending_jobs_removed": len(pending_jobs)},
+    )
+    return {"cleared": cleared, "pending_jobs_removed": len(pending_jobs), "message": message}

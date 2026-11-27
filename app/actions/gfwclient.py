@@ -7,6 +7,7 @@ import random
 import re
 import backoff
 from enum import Enum
+from types import SimpleNamespace
 from urllib.parse import urlparse, parse_qs
 
 import httpx
@@ -93,7 +94,35 @@ class DataAPIKeysResponse(pydantic.BaseModel):
 
 
 class DataAPIAuthException(Exception):
-    pass
+    """
+    Global Nature Watch answered a sign-in or API-key request with an error.
+    Carries the status (so 429/5xx are still retried) but never the failed
+    request, whose body holds the login.
+    """
+    def __init__(self, message: str, status_code: Optional[int] = None):
+        super().__init__(message)
+        self.response = SimpleNamespace(status_code=status_code) if status_code is not None else None
+
+
+class DataAPIConnectionError(ConnectionError):
+    """
+    A sign-in or API-key request didn't reach Global Nature Watch (timeout,
+    connection error). A ConnectionError, so it is retried like one, without
+    the failed request attached.
+    """
+
+
+def _login_failure(e: httpx.HTTPError, attempt: str, account_label: str) -> Exception:
+    """A copy of `e` that names the account by its label and leaves the request behind."""
+    if isinstance(e, httpx.HTTPStatusError):
+        return DataAPIAuthException(
+            f"Global Nature Watch rejected the request to {attempt} for {account_label} "
+            f"(HTTP {e.response.status_code}).",
+            status_code=e.response.status_code,
+        )
+    return DataAPIConnectionError(
+        f"Couldn't reach Global Nature Watch to {attempt} for {account_label} ({type(e).__name__})."
+    )
 
 
 class DataAPIQueryException(Exception):
@@ -381,15 +410,26 @@ class DataAPI:
     DATA_API_URL = "https://data-api.globalforestwatch.org"
     RESOURCE_WATCH_URL = "https://api.resourcewatch.org"
 
-    def __init__(self, *, username: str = None, password: str = None):
+    def __init__(self, *, username: str = None, password: str = None, account_label: str = None):
 
         self._username = username
+        # Names the account in logs and errors. The shared account passes a label
+        # so its email never reaches a log or the portal.
+        self._account_label = account_label or username
         self._password = password
         self._auth_gen = None
         self._api_keys = []
 
-    @backoff.on_exception(backoff.expo, (httpx.TimeoutException, httpx.HTTPStatusError), max_tries=3)
     async def get_access_token(self):
+        try:
+            return await self._request_access_token()
+        except (httpx.HTTPStatusError, httpx.RequestError) as e:
+            # Raised without the failed request: its body holds the login, and the
+            # runner copies a failed request into the portal activity log.
+            raise _login_failure(e, "sign in", self._account_label) from None
+
+    @backoff.on_exception(backoff.expo, (httpx.TimeoutException, httpx.HTTPStatusError), max_tries=3)
+    async def _request_access_token(self):
 
         async with httpx.AsyncClient(timeout=DEFAULT_REQUEST_TIMEOUT) as client:
             response = await client.post(
@@ -422,8 +462,8 @@ class DataAPI:
                     ttl = (expire_at - present).total_seconds()
                     logger.debug(f"Using cached auth, expires in {ttl} seconds.")
 
-            except httpx.HTTPStatusError as e:
-                logger.exception(f"Failed to authenticate with GNW Data API for user {self._username}: {e}")
+            except DataAPIAuthException as e:
+                logger.error(f"Failed to authenticate with GNW Data API: {e}")
                 raise e
             else:
                 yield token
@@ -503,7 +543,11 @@ class DataAPI:
                         ]:
             return good_api_keys[-1]
 
-        data = await self.create_api_key()
+        try:
+            data = await self.create_api_key()
+        except (httpx.HTTPStatusError, httpx.RequestError) as e:
+            # The failed request's body names the account's email: keep it out of logs.
+            raise _login_failure(e, "create an API key", self._account_label) from None
         self._api_keys.append(data)
         return data
 
